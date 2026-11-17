@@ -194,8 +194,14 @@ const hasKmsi = (page) => page.evaluate(() => {
   return Boolean(h && /stay signed in/i.test(h.textContent || ''));
 }).catch(() => false);
 
-// True only when the real signed-in chat is showing (no marketing "Sign in" CTA).
-const isOnChat = async (page) => onCopilot(page) && !(await hasSignInCta(page));
+// The signed-in chat has a visible message composer.
+const hasChatComposer = (page) => page.evaluate(() => {
+  const els = Array.from(document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]'));
+  return els.some((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+}).catch(() => false);
+
+// True only when the real signed-in chat is showing (no marketing "Sign in" CTA, and a composer is present).
+const isOnChat = async (page) => onCopilot(page) && !(await hasSignInCta(page)) && (await hasChatComposer(page));
 
 async function clickSignIn(page) {
   return page.evaluate(() => {

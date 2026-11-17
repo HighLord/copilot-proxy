@@ -44,7 +44,7 @@ Then open http://localhost:3000 and sign in.
 | `ADMIN_API_KEY` | *(unset)* | When set, the Admin tab asks for this key |
 | `COPILOT_MOCK` | `0` | `1` = local mock Copilot + mock sign-in (no account needed) |
 | `COPILOT_LOGIN_URL` | `https://copilot.cloud.microsoft` | Entry page for sign-in |
-| `COPILOT_HEADLESS` | `1` | `0` shows the browser during sign-in |
+| `COPILOT_HEADLESS` | *(unset)* | `1` hides the sign-in browser; the default shows it |
 | `COPILOT_CHATHUB_WS_HOST` | `substrate.office.com` | Host whose WebSocket carries the token |
 | `COPILOT_DEBUG_FRAMES` | `0` | `1` logs SignalR frames (token redacted) |
 
