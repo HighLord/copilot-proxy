@@ -1,0 +1,18 @@
+{
+  "name": "copilot-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Streams M365 Copilot Chat responses over SSE using an existing browser session token",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --env-file=.env src/server.js"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "playwright": "^1.65.1",
+    "ws": "^8.18.0"
+  }
+}

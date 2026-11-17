@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Copilot</title>
+<link rel="stylesheet" href="/styles.css">
+<script>
+  // Apply the saved theme before first paint to avoid a flash.
+  try {
+    var t = localStorage.getItem('theme') || 'auto';
+    var dark = t === 'dark' || (t === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  } catch (e) {}
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="backdrop"></div>
+  <aside id="sidebar" aria-label="Sidebar">
+    <div class="side-top">
+      <div class="brand"><i data-icon="logo" data-size="22" class="logo"></i><span id="brandName">Copilot</span></div>
+      <button class="icon-btn" id="collapseBtn" title="Close sidebar" aria-label="Close sidebar"><i data-icon="panel"></i></button>
+    </div>
+    <nav class="side-nav">
+      <button class="nav-item accent" id="newChatBtn"><span class="nav-ic"><i data-icon="plus" data-size="16"></i></span>New chat</button>
+      <div class="search"><i data-icon="search" data-size="16"></i><input id="searchInput" type="search" placeholder="Search chats" autocomplete="off" aria-label="Search chats"></div>
+      <button class="nav-item" id="memoryBtn"><span class="nav-ic"><i data-icon="bulb" data-size="17"></i></span>Memory</button>
+    </nav>
+    <div class="side-scroll" id="chatList"></div>
+    <div class="side-bottom">
+      <button class="user-chip" id="userBtn" aria-haspopup="menu">
+        <span class="avatar" id="avatar">?</span>
+        <span class="user-meta"><span id="userName">Account</span><span class="plan" id="userSub">Settings</span></span>
+        <i data-icon="chevrons" data-size="16"></i>
+      </button>
+    </div>
+  </aside>
+
+  <main id="main" class="empty">
+    <header id="topbar">
+      <button class="icon-btn" id="openSidebarBtn" title="Open sidebar" aria-label="Open sidebar"><i data-icon="panel"></i></button>
+      <button class="title-btn" id="titleBtn" aria-haspopup="menu"><span id="titleText">New chat</span><i data-icon="chevron" data-size="16"></i></button>
+    </header>
+    <section id="scroll" aria-live="polite"><div id="thread"></div></section>
+    <button class="to-bottom hidden" id="toBottom" aria-label="Scroll to latest"><i data-icon="arrowdown" data-size="18"></i></button>
+
+    <div id="stage">
+      <div class="hero"><i data-icon="logo" data-size="34" class="logo"></i><h1 id="greeting">Hello</h1></div>
+      <div class="notice hidden" id="notice" role="alert"><span id="noticeText"></span><button id="noticeClose" aria-label="Dismiss"><i data-icon="x" data-size="16"></i></button></div>
+      <div class="composer" id="composer">
+        <textarea id="input" rows="1" placeholder="How can I help you today?" aria-label="Message"></textarea>
+        <div class="composer-row">
+          <button class="plus-btn" id="plusBtn" title="More" aria-label="More" aria-haspopup="menu"><i data-icon="plus" data-size="18"></i></button>
+          <span class="spacer"></span>
+          <span class="char-count hidden" id="charCount"></span>
+          <button class="mode-btn" id="modeBtn" aria-haspopup="listbox" aria-expanded="false"><span id="modeLabel">Quick response</span><i data-icon="chevron" data-size="16"></i></button>
+          <button class="send-btn" id="sendBtn" title="Send message" aria-label="Send message" disabled><i data-icon="arrowup" data-size="18"></i></button>
+        </div>
+      </div>
+      <div class="chips" id="chips"></div>
+      <p class="disclaimer" id="disclaimer">Copilot can make mistakes. Please double-check responses.</p>
+    </div>
+  </main>
+</div>
+<div id="popups"></div>
+<div id="modalRoot"></div>
+<script src="/markdown.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
