@@ -391,11 +391,13 @@
     });
     if (!ok) return;
     try {
-      await api('DELETE', `/api/conversations/${id}`);
+      const result = await api('DELETE', `/api/conversations/${id}`);
       state.conversations = state.conversations.filter((c) => c.id !== id);
       if (state.current?.id === id) newChat();
       else renderSidebar();
-      toast('Chat deleted');
+      // The server deletes locally and, best-effort, on Copilot's side. Surface a sync failure.
+      if (result?.copilot?.attempted && !result.copilot.deleted) toast('Chat deleted here, but Copilot sync failed');
+      else toast('Chat deleted');
     } catch (error) {
       if (error.status === 404) { state.conversations = state.conversations.filter((c) => c.id !== id); renderSidebar(); }
       else toast(error.message);

@@ -107,6 +107,16 @@ module.exports = Object.freeze({
   // Every sign-in is a whole Chromium. Raise COPILOT_MAX_LOGINS only if the server has the memory for it.
   MAX_CONCURRENT_LOGINS: Number(process.env.COPILOT_MAX_LOGINS) || 2,
 
+  // ---- chat-history (delete) over the _serverFn endpoint ----
+  // Deleting a conversation is a serverFn call on copilot.cloud.microsoft, not a Chathub WebSocket
+  // message. The route hash (serverFnIdHash) identifies the "chat-history" server function and can
+  // change between Copilot builds; override via COPILOT_SERVERFN_HASH if it ever 404s.
+  COPILOT_BASE_URL: 'https://copilot.cloud.microsoft',
+  SERVERFN_HASH: process.env.COPILOT_SERVERFN_HASH ?? '73e9366cfbebe3976abc796ef16c0305213fd6f32aea4731837e2a1f18e54268',
+  SERVERFN_HOST_CONTEXT: process.env.COPILOT_SERVERFN_HOST_CONTEXT ?? '{"clientPlatform":"web","hostName":"officeweb","appMode":"default"}',
+  // Fallback x-client-eligibility for serverFn calls; the live value captured at sign-in wins.
+  SERVERFN_CLIENT_ELIGIBILITY: process.env.COPILOT_SERVERFN_CLIENT_ELIGIBILITY ?? '{"isCopilotEligible":true,"cohort":"bcwaf","persona":"none","ageGroup":"none","isCopilotEnabledRegion":true,"isOptedOutByAdmin":false,"eduType":"none","isError":false,"m365CopilotAcquisitionState":"acquired","acquisitionState":"acquired","featureSet":{"uxFeatures":["CodeInterpreter","Designer","GPTV","Threads","WebGroundingControls","Pages","FileUpload"],"serverFeatures":[]},"windowsAILearningStartDate":"1970-01-01T00:00:00Z","CopilotBlockedCustomLink":"","isConsumptiveServicesDiscoverable":"false","accessToUsageBasedBilling":"true","shareSetting":"Confidential","hasAdminLedRoutingRules":false,"copilotAdminPinSetting":"Pinned"}',
+
   // ---- file uploads (attachments Copilot can actually read) ----
   // The Chathub chat token has no Files scope, so uploads go through Graph using the M365Chat
   // client's own refresh token (captured from MSAL at sign-in). Values copied from the browser.

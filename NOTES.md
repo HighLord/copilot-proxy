@@ -14,6 +14,11 @@ _Last updated: 2026-11-19_
 - **File uploads** — `POST /api/upload` and `POST /v1/files` upload to "Microsoft Copilot Chat
   Files" via Graph and attach as a `LocalFile` annotation (`attachments` array on `/chat` and the
   API). Annotation-id format verified against a captured HAR.
+- **Delete sync (chat UI only)** — deleting a conversation in the chat UI also sends Copilot's
+  `DeleteConversation` serverFn (TSS-framed, `x-route-id: chat-history`), auth'd by the
+  `copilot.cloud.microsoft` session cookies captured at sign-in. Local delete is the source of
+  truth; a Copilot sync failure is reported but never blocks the local delete. The `/v1` API is
+  deliberately untouched.
 - OpenAI- and Anthropic-compatible API under `/v1` (tool calling emulated via `<tool_call>` blocks).
 
 ## Remaining / needs a live smoke test
@@ -23,8 +28,16 @@ _Last updated: 2026-11-19_
    `authManager.js`) is implemented but unverified against a real Microsoft account. Sign in, attach
    a file in the chat UI, and confirm Copilot actually reads it; if the annotation id does not
    resolve, the SPO id reconstruction in `src/upload.js` is the first place to look.
+3. **Delete sync end-to-end** — the Copilot-side delete is wired but UNVERIFIED. The captured
+   `DeleteConversation` request carries Copilot's whole chat-history state plus an IC3 sync
+   watermark; this proxy sends a minimal state with the watermark captured at sign-in (or a fresh
+   one). Whether Copilot accepts that is unknown. Sign in, delete a proxy chat, then check
+   copilot.cloud.microsoft that it is gone. If it 409s or no-ops, the likely fix is to capture the
+   full history state at sign-in (`flow.chatSyncState` only stores the watermark today) and replay
+   the chat list in `src/historyClient.js`.
 
 ## How to resume
-- Run `node --test test/compat.test.js` (32 tests) — all pass.
+- Run `node --test test/compat.test.js` (35 tests) — all pass.
 - Sign in fresh (start the server, open the app, complete sign-in incl. 2FA), then attach a file to
-  verify the upload path against the real OneDrive/Graph flow.
+  verify the upload path against the real OneDrive/Graph flow, and delete a chat to verify the
+  Copilot-side delete.

@@ -17,6 +17,8 @@ const apiKeys = require('../src/apiKeys');
 const { createCompatRouter } = require('../src/compatApi');
 const { decodeDriveId, buildFileAnnotation } = require('../src/upload');
 const { buildChatArguments } = require('../src/copilotClient');
+const { encode, decode, wrapData } = require('../src/tss');
+const { buildDeleteBody, makeSyncState, findSyncState } = require('../src/historyClient');
 
 // ---------------------------------------------------------------- parser
 
@@ -629,4 +631,55 @@ test('http: attachments are passed through as LocalFile annotations; /v1/files u
     assert.equal(file.filename, 'report.pdf');
     assert.match(file.id, /^SPO_/);
   } finally { t.close(); }
+});
+
+// ---------------------------------------------------------------- delete (chat-history serverFn)
+
+test('tss: encode/decode round-trips strings, ints, bools, arrays and structs', () => {
+  const value = {
+    action: 'DeleteConversation',
+    conversationId: '81811857-8148-40b8-9814-7d05ff5253e3',
+    count: 7,
+    big: 1795102760105,
+    flag: true,
+    list: [1, 'two', { three: 3 }],
+    empty: {},
+  };
+  const encoded = encode(value, { index: 0 });
+  assert.equal(encoded.t, 10);
+  assert.equal(encoded.p.k[0], 'action');
+  const decoded = decode(encoded);
+  assert.equal(decoded.action, 'DeleteConversation');
+  assert.equal(decoded.conversationId, '81811857-8148-40b8-9814-7d05ff5253e3');
+  assert.equal(decoded.count, 7);
+  assert.equal(decoded.big, '1795102760105', 'int64 stays a decimal string to avoid precision loss');
+  assert.equal(decoded.flag, 1);
+  assert.deepEqual(decoded.list, [1, 'two', { three: 3 }]);
+  assert.deepEqual(decoded.empty, {});
+});
+
+test('delete: buildDeleteBody wraps a DeleteConversation serverFn in the captured envelope', () => {
+  const body = buildDeleteBody({ conversationId: '81811857-8148-40b8-9814-7d05ff5253e3', syncState: 'SYNC' });
+  assert.equal(body.f, 127);
+  assert.deepEqual(body.m, []);
+  const payload = decode(body.t);
+  assert.equal(payload.data.action, 'DeleteConversation');
+  assert.equal(payload.data.conversationId, '81811857-8148-40b8-9814-7d05ff5253e3');
+  assert.equal(payload.data.state.conversationPageHistoryList.syncState, 'SYNC');
+  assert.deepEqual(payload.data.state.conversationPageHistoryList.chats, []);
+  assert.equal(payload.data.conversationHistoryFilter.syncState, '');
+  // wrapData is the same envelope a _serverFn request uses, so the outer JSON serialises cleanly.
+  assert.equal(JSON.parse(JSON.stringify(wrapData({ x: 1 }))).f, 127);
+});
+
+test('delete: makeSyncState is a double-base64 IC3 watermark; findSyncState finds it', () => {
+  const syncState = makeSyncState(new Date('2026-11-19T15:39:30.000Z'));
+  const outer = JSON.parse(Buffer.from(syncState, 'base64').toString('utf8'));
+  const inner = JSON.parse(Buffer.from(outer.IC3SyncState, 'base64').toString('utf8'));
+  assert.equal(inner.sortOrder, 1);
+  assert.equal(inner.includeZeroLMST, false);
+  assert.equal(inner.deliveredSegments.length, 1);
+  assert.equal(inner.deliveredSegments[0].end, '2026-11-19T15:39:30.000+00:00');
+  assert.equal(findSyncState({ nested: { deep: { syncState } } }), syncState);
+  assert.equal(findSyncState({ syncState: '' }), null);
 });

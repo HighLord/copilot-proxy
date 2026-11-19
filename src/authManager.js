@@ -6,6 +6,8 @@ const crypto = require('crypto');
 const config = require('./config');
 const { parseClaims, identityFromClaims } = require('./identity');
 const { writeJsonAtomicSync, readJsonSync } = require('./fsUtil');
+const { decode } = require('./tss');
+const { findSyncState } = require('./historyClient');
 
 const AUTH_DIR = path.join(config.DATA_DIR, 'auth');
 const SESSIONS_DIR = path.join(AUTH_DIR, 'sessions');
@@ -81,6 +83,11 @@ function getSession(email) {
     graphToken: rec.graphToken ?? null,
     graphTokenExp: rec.graphTokenExp ?? null,
     spoHost: rec.spoHost ?? null,
+    // Optional chat-history (delete) context, captured at sign-in.
+    serverFnCookies: rec.serverFnCookies ?? null,
+    chatSyncState: rec.chatSyncState ?? null,
+    clientEligibility: rec.clientEligibility ?? null,
+    serverFnSessionId: rec.serverFnSessionId ?? null,
   };
 }
 
@@ -297,6 +304,35 @@ async function launchReal(email) {
     }
   });
 
+  // Capture serverFn context for the chat-history (delete) flow: the x-client-eligibility and
+  // x-session-id headers, plus the IC3 sync watermark Copilot hands back in its responses. All
+  // additive — a miss must never fail the sign-in.
+  page.on('request', (req) => {
+    try {
+      const u = new URL(req.url());
+      if (!u.pathname.includes('/_serverFn/')) return;
+      const eligibility = req.headers()['x-client-eligibility'];
+      if (eligibility && !flow.clientEligibility) flow.clientEligibility = eligibility;
+      const sid = req.headers()['x-session-id'];
+      if (sid && !flow.serverFnSessionId) flow.serverFnSessionId = sid;
+    } catch { /* ignore */ }
+  });
+  page.on('response', (res) => {
+    if (flow.chatSyncState) return;
+    try {
+      const req = res.request();
+      const u = new URL(req.url());
+      if (!u.pathname.includes('/_serverFn/')) return;
+      if (req.headers()['x-route-id'] !== 'chat-history') return;
+      res.text().then((text) => {
+        if (flow.chatSyncState || text.length > 5_000_000) return;
+        const parsed = JSON.parse(text);
+        const syncState = findSyncState(decode(parsed.t));
+        if (syncState) flow.chatSyncState = syncState;
+      }).catch(() => { /* ignore */ });
+    } catch { /* ignore */ }
+  });
+
   return flow;
 }
 
@@ -424,7 +460,19 @@ async function capture(flow) {
   throw new LoginError('Signed in, but the Copilot chat token could not be captured automatically. Retry — the session is now remembered.');
 }
 
-function finishReal(flow, token) {
+// Grabs the copilot.cloud.microsoft session cookies while the private browser is still open. These
+// authorize the _serverFn chat-history calls (e.g. delete), which do NOT use the Chathub token.
+async function captureServerFnSession(flow) {
+  try {
+    const cookies = await flow.context.cookies('https://copilot.cloud.microsoft');
+    if (!cookies || cookies.length === 0) return {};
+    return { serverFnCookies: cookies.map((c) => `${c.name}=${c.value}`).join('; ') };
+  } catch {
+    return {};
+  }
+}
+
+async function finishReal(flow, token) {
   const claims = parseClaims(token);
   const rec = identityFromClaims(claims, flow.email);
   saveSession({ ...rec, token, savedAt: new Date().toISOString() });
@@ -432,21 +480,27 @@ function finishReal(flow, token) {
   flow.email = rec.email;
   flow.name = rec.name;
   console.log(`[auth] Signed in as ${rec.email} — token captured (expires ${rec.exp ? new Date(rec.exp * 1000).toISOString() : 'unknown'})`);
-  // Best-effort: also grab the MSAL refresh token and a Files-scoped Graph token so file uploads
-  // work later. These are additive — a failure here must never fail the sign-in itself.
-  scanMsal(flow)
-    .then((extras) => {
-      if (!extras.refreshToken && !extras.graphToken) return;
-      const current = sessions.get(rec.email);
-      if (!current) return;
+  // Capture the extra tokens while the browser is still open, then close it. The MSAL refresh +
+  // Files-scoped Graph token enable file uploads; the cookies + IC3 sync watermark enable
+  // chat-history deletes. All are additive — a failure here must never fail the sign-in itself.
+  try {
+    const [uploads, webSession] = await Promise.all([scanMsal(flow), captureServerFnSession(flow)]);
+    const current = sessions.get(rec.email);
+    if (current) {
       const merged = { ...current };
-      if (extras.refreshToken) merged.refreshToken = extras.refreshToken;
-      if (extras.graphToken) { merged.graphToken = extras.graphToken; merged.graphTokenExp = extras.graphTokenExp ?? null; }
-      if (extras.spoHost) merged.spoHost = extras.spoHost;
+      if (uploads.refreshToken) merged.refreshToken = uploads.refreshToken;
+      if (uploads.graphToken) { merged.graphToken = uploads.graphToken; merged.graphTokenExp = uploads.graphTokenExp ?? null; }
+      if (uploads.spoHost) merged.spoHost = uploads.spoHost;
+      if (webSession.serverFnCookies) merged.serverFnCookies = webSession.serverFnCookies;
+      if (flow.chatSyncState) merged.chatSyncState = flow.chatSyncState;
+      if (flow.clientEligibility) merged.clientEligibility = flow.clientEligibility;
+      if (flow.serverFnSessionId) merged.serverFnSessionId = flow.serverFnSessionId;
       saveSession(merged);
-      console.log(`[auth] Captured upload tokens for ${rec.email} (refresh=${Boolean(extras.refreshToken)}, graph=${Boolean(extras.graphToken)})`);
-    })
-    .catch((error) => console.log(`[auth] Could not capture upload tokens: ${error.message}`));
+      console.log(`[auth] Captured extras for ${rec.email} (upload refresh=${Boolean(merged.refreshToken)}, web cookies=${Boolean(merged.serverFnCookies)}, syncState=${Boolean(merged.chatSyncState)})`);
+    }
+  } catch (error) {
+    console.log(`[auth] Could not capture extra tokens: ${error.message}`);
+  }
   return endFlow(flow);
 }
 

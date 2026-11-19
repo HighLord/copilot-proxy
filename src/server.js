@@ -15,6 +15,7 @@ const { buildPreamble, composeMessage, hashText } = require('./prompts');
 const apiKeys = require('./apiKeys');
 const { createCompatRouter } = require('./compatApi');
 const { uploadFile } = require('./upload');
+const { deleteConversation } = require('./historyClient');
 
 const { streamChat, CopilotError } = config.MOCK ? mockClient : realClient;
 
@@ -227,13 +228,36 @@ api.patch('/conversations/:id', handler(async (req, res) => {
   res.json({ ok: true, title: conv.title, pinned: Boolean(conv.pinned) });
 }));
 
+// Deletes a conversation on Copilot's side, best-effort. The local store is the source of truth:
+// a Copilot sync failure is reported but never blocks the local delete. In mock mode this is a no-op.
+async function deleteOnCopilot(email, conversationId) {
+  if (config.MOCK) return { attempted: false, deleted: false, error: null };
+  try {
+    const session = auth.getSession(email);
+    await deleteConversation({ session, conversationId });
+    return { attempted: true, deleted: true, error: null };
+  } catch (error) {
+    return { attempted: true, deleted: false, error: error.message };
+  }
+}
+
 api.delete('/conversations/:id', handler(async (req, res) => {
   if (!(await conversations.remove(req.userEmail, req.params.id))) throw httpError(HTTP_NOT_FOUND, 'Conversation not found');
-  res.json({ ok: true });
+  const copilot = await deleteOnCopilot(req.userEmail, req.params.id);
+  res.json({ ok: true, copilot });
 }));
 
 api.delete('/conversations', handler(async (req, res) => {
-  res.json({ ok: true, deleted: await conversations.removeAll(req.userEmail) });
+  const ids = conversations.list(req.userEmail).map((c) => c.id);
+  const deleted = await conversations.removeAll(req.userEmail);
+  const results = await Promise.allSettled(ids.map((id) => deleteOnCopilot(req.userEmail, id)));
+  const copilot = { attempted: ids.length, deleted: 0, errors: [] };
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value?.deleted) copilot.deleted += 1;
+    const msg = r.status === 'rejected' ? (r.reason?.message ?? 'unknown error') : (r.value?.error ?? null);
+    if (msg) copilot.errors.push(msg);
+  }
+  res.json({ ok: true, deleted, copilot });
 }));
 
 api.get('/preferences', (req, res) => res.json(userStore.publicPreferences(req.userEmail)));

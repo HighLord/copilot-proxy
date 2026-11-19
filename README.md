@@ -49,6 +49,15 @@ the test suite). Upload with `POST /v1/files?filename=name.pdf` (raw bytes) or
 a chat request. Uploads require the M365Chat refresh token (captured from MSAL at sign-in) to
 obtain a Files-scoped Graph token.
 
+## Deleting conversations
+
+Deleting a chat in the web UI deletes it locally and, best-effort, on Copilot's side. The
+Copilot-side delete is a `_serverFn` call (`x-route-id: chat-history`, TSS-framed body) rather than
+a Chathub WebSocket message, and it is authenticated with the `copilot.cloud.microsoft` session
+cookies — both captured automatically at sign-in. The `/v1` API is not affected. Note: this path is
+implemented but not yet verified against a real account (see NOTES.md); a Copilot sync failure is
+reported in the UI but never blocks the local delete.
+
 ## Requirements
 
 - Node.js >= 20.6
@@ -75,6 +84,7 @@ Then open http://localhost:3000 and sign in.
 | `COPILOT_LOGIN_URL` | `https://copilot.cloud.microsoft` | Entry page for sign-in |
 | `COPILOT_HEADLESS` | *(unset)* | `1` hides the sign-in browser; the default shows it |
 | `COPILOT_CHATHUB_WS_HOST` | `substrate.office.com` | Host whose WebSocket carries the token |
+| `COPILOT_SERVERFN_HASH` | *(captured hash)* | Route hash for the chat-history `_serverFn` (delete) endpoint |
 | `COPILOT_DEBUG_FRAMES` | `0` | `1` logs SignalR frames (token redacted) |
 
 ## Troubleshooting
