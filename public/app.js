@@ -23,6 +23,7 @@
     shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
     logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
     pen: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+    attach: '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
     cap: '<path d="M22 10 12 5 2 10l10 5 10-5zM6 12v5c3 2 9 2 12 0v-5"/>',
     code: '<path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/>',
     coffee: '<path d="M17 8h1a4 4 0 0 1 0 8h-1M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4ZM6 2v3M10 2v3M14 2v3"/>',
@@ -73,6 +74,7 @@
     conversations: [],
     current: null, // { id, title, pinned, messages } or null for a fresh chat
     mode: store.get('mode', ''),
+    attachments: [], // pending file attachments: [{ id, name, url }] (LocalFile annotations)
     search: '',
     streaming: false,
     abort: null,
@@ -118,6 +120,32 @@
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new ApiError(res.status, data.error ?? `HTTP ${res.status}`);
     return data;
+  }
+
+  // Waits for a sign-in step the server is finishing in the background. Every poll is a short request,
+  // so a slow Microsoft page can no longer make a phone drop a long-held connection ("Load failed").
+  async function pollFlow(loginId) {
+    const deadline = Date.now() + 5 * 60_000;
+    let failures = 0;
+    let attempt = 0;
+    for (;;) {
+      // Check quickly at first so fast steps feel instant, then ease off while Microsoft is slow.
+      await new Promise((resolve) => setTimeout(resolve, attempt < 4 ? 600 : 1500));
+      attempt += 1;
+      try {
+        const res = await fetch(`/api/auth/flow/${encodeURIComponent(loginId)}`, { cache: 'no-store' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new ApiError(res.status, data.error ?? `HTTP ${res.status}`);
+        failures = 0;
+        if (data.state !== 'working') return data;
+      } catch (error) {
+        // A 4xx means the server has no such sign-in. Anything else (phone asleep, network blip) is retried.
+        if (error instanceof ApiError && error.status >= 400 && error.status < 500) throw error;
+        failures += 1;
+        if (failures >= 10) throw new Error('Lost contact with the server. Check your connection and try again.');
+      }
+      if (Date.now() > deadline) throw new Error('Sign-in took too long. Please try again.');
+    }
   }
 
   // ---------- popups: menu, modal, toast ----------
@@ -389,7 +417,12 @@
   }
 
   function userEl(message) {
-    return h('div', { class: 'msg user', 'data-id': message.id }, h('div', { class: 'bubble' }, message.text));
+    const el = h('div', { class: 'msg user', 'data-id': message.id }, h('div', { class: 'bubble' }, message.text));
+    if (message.attachments?.length) {
+      el.append(h('div', { class: 'msg-files' }, message.attachments.map((a) =>
+        h('span', { class: 'msg-file', title: a.url }, `${icon('attach', 13)} ${a.name}`))));
+    }
+    return el;
   }
 
   function actionsRow(message) {
@@ -404,9 +437,16 @@
     return h('div', { class: 'actions' }, message.text ? copy : null, label ? h('span', { class: 'mode-tag' }, label) : null);
   }
 
+  function reasoningEl(reasoning) {
+    return h('details', { class: 'reasoning' },
+      h('summary', null, 'Thought process'),
+      h('div', { class: 'reasoning-body' }, reasoning));
+  }
+
   function assistantEl(message) {
-    const el = h('div', { class: 'msg assistant', 'data-id': message.id },
-      h('div', { class: 'prose', html: window.renderMarkdown(message.text || '') }));
+    const el = h('div', { class: 'msg assistant', 'data-id': message.id });
+    if (message.reasoning) el.append(reasoningEl(message.reasoning));
+    el.append(h('div', { class: 'prose', html: window.renderMarkdown(message.text || '') }));
     if (message.status === 'stopped') el.append(h('div', { class: 'meta-note' }, 'Response stopped'));
     if (message.status === 'error') el.append(h('div', { class: 'error-box' }, `The response was interrupted: ${message.error ?? 'unknown error'}`));
     el.append(actionsRow(message));
@@ -496,7 +536,7 @@
       send.setAttribute('aria-label', 'Stop response');
       send.innerHTML = '<svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="3"/></svg>';
     } else {
-      send.disabled = input.value.trim() === '' || length > max;
+      send.disabled = (input.value.trim() === '' && state.attachments.length === 0) || length > max;
       send.title = 'Send message';
       send.setAttribute('aria-label', 'Send message');
       send.innerHTML = icon('arrowup', 18);
@@ -539,6 +579,57 @@
       { label: 'Manage memory', icon: 'sliders', onClick: () => openSettings('memory') },
       { label: 'Personal preferences', icon: 'pencil', onClick: () => openSettings('personal') },
     ], { above: true, width: 260 });
+  });
+
+  // ---------- file attachments ----------
+  function renderAttachments() {
+    const box = $('attachments');
+    box.replaceChildren();
+    box.classList.toggle('hidden', state.attachments.length === 0);
+    state.attachments.forEach((att, index) => {
+      const remove = h('button', {
+        class: 'icon-btn', 'aria-label': `Remove ${att.name}`, title: 'Remove attachment',
+        onclick: () => { state.attachments.splice(index, 1); renderAttachments(); },
+        html: icon('x', 14),
+      });
+      box.append(h('div', { class: 'attachment' },
+        h('span', { class: 'att-name', title: att.name }, att.name), remove));
+    });
+    updateComposer();
+  }
+
+  async function uploadAttachment(file) {
+    const res = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}`, {
+      method: 'POST',
+      headers: { ...authHeaders(false), 'content-type': file.type || 'application/octet-stream' },
+      body: file,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (res.status === 401) showLogin({ message: data.error ?? 'Please sign in again' });
+      throw new ApiError(res.status, data.error ?? `HTTP ${res.status}`);
+    }
+    return data;
+  }
+
+  async function attachFiles(fileList) {
+    const files = Array.from(fileList ?? []);
+    if (!files.length) return;
+    for (const file of files) {
+      try {
+        const result = await uploadAttachment(file);
+        state.attachments.push({ id: result.annotation.id, name: result.name, url: result.url });
+      } catch (error) {
+        toast(`Could not attach ${file.name}: ${error.message}`);
+      }
+    }
+    renderAttachments();
+  }
+
+  $('uploadBtn').addEventListener('click', () => $('fileInput').click());
+  $('fileInput').addEventListener('change', (event) => {
+    attachFiles(event.target.files);
+    event.target.value = '';
   });
 
   async function addInputToMemory() {
@@ -598,22 +689,28 @@
     const label = h('span', { class: 'label' }, 'Thinking');
     const elapsed = h('span', { class: 'elapsed' });
     const thinking = h('div', { class: 'thinking' }, h('span', { html: icon('logo', 18) }), label, elapsed);
+    const reasoningBody = h('div', { class: 'reasoning-body' });
+    const reasoning = h('details', { class: 'reasoning hidden' }, h('summary', null, 'Thought process'), reasoningBody);
     const prose = h('div', { class: 'prose hidden' });
-    const el = h('div', { class: 'msg assistant streaming' }, thinking, prose);
-    return { el, thinking, label, elapsed, prose };
+    const el = h('div', { class: 'msg assistant streaming' }, thinking, reasoning, prose);
+    return { el, thinking, label, elapsed, prose, reasoning, reasoningBody };
   }
 
   async function send() {
     if (state.streaming) return;
     const text = $('input').value.trim();
     const max = state.boot.maxPromptChars;
-    if (!text || text.length > max) return;
+    if ((!text && state.attachments.length === 0) || text.length > max) return;
     hideNotice();
     closeMenu();
+    const attachments = state.attachments.slice();
+    state.attachments = [];
+    renderAttachments();
 
     const conv = state.current ?? { id: null, title: 'New chat', pinned: false, messages: [] };
     state.current = conv;
     const userMessage = { id: `pending-${Date.now()}`, role: 'user', text };
+    if (attachments.length) userMessage.attachments = attachments.map((a) => ({ name: a.name, url: a.url }));
     conv.messages.push(userMessage);
     $('input').value = '';
     renderHeader();
@@ -637,6 +734,7 @@
     scrollToBottom(true);
 
     let reply = '';
+    let reasoning = '';
     let started = false;
     let frame = 0;
     let assistantId = null;
@@ -653,7 +751,7 @@
         method: 'POST',
         signal: controller.signal,
         headers: { ...authHeaders(false), 'content-type': 'application/json' },
-        body: JSON.stringify({ prompt: text, conversationId: conv.id ?? undefined, mode: modeId }),
+        body: JSON.stringify({ prompt: text, conversationId: conv.id ?? undefined, mode: modeId, attachments }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -674,6 +772,10 @@
             renderSidebar();
           } else if (name === 'status') {
             if (!started) live.label.textContent = (data.kind === 'InternalSearchQuery' ? `Searching: ${data.text}` : data.text).slice(0, 90);
+          } else if (name === 'reasoning') {
+            reasoning += (reasoning ? '\n' : '') + (data.text ?? '');
+            live.reasoning.classList.remove('hidden');
+            live.reasoningBody.textContent = reasoning;
           } else if (name === 'delta') {
             if (!started) {
               started = true;
@@ -706,6 +808,8 @@
       userNode.remove();
       conv.messages.pop();
       $('input').value = text;
+      state.attachments = attachments;
+      renderAttachments();
       if (failure.conversationDeleted || !conv.id) {
         state.current = null;
         state.conversations = state.conversations.filter((c) => c.id !== conv.id);
@@ -721,6 +825,7 @@
         status: failure ? 'error' : finalStatus,
         error: failure?.message,
       };
+      if (reasoning) message.reasoning = reasoning;
       conv.messages.push(message);
       $('thread').append(assistantEl(message));
       if (failure) showNotice(failure.message);
@@ -781,6 +886,14 @@
 
   // ---------- sign-in (Microsoft) ----------
   let loginOpen = false;
+
+  // Status lines shown while the server drives the Microsoft sign-in in a real browser.
+  const WORKING = {
+    email: ['Opening Microsoft sign-in…', 'Loading the sign-in page…', 'Verifying your account…', 'Connecting to Copilot…', 'Almost there…'],
+    password: ['Checking your password…', 'Waiting for Microsoft…', 'Setting up your Copilot session…', 'Almost there…'],
+    mfa: ['Verifying your code…', 'Signing you in…', 'Setting up your Copilot session…', 'Almost there…'],
+  };
+
   function showLogin({ message = '' } = {}) {
     if (loginOpen) return;
     loginOpen = true;
@@ -790,53 +903,80 @@
     const foot = h('div', { class: 'modal-foot' });
     const modal = openModal({ title: ' ', dismissible: false, content: h('div', null, body, foot), actions: [] });
 
-    const setBusy = (on) => { for (const b of foot.querySelectorAll('button')) b.disabled = on; };
     const cancelFlow = () => { if (loginId) { postAuth('/api/auth/cancel', { loginId }).catch(() => {}); loginId = null; } };
 
-    function drawEmail() {
+    // Spinner + rotating status lines + elapsed time, so the page never looks frozen.
+    // Returns a function that stops the timers.
+    function showWorking(title, steps) {
+      const label = h('span', { class: 'label' }, steps[0]);
+      const elapsed = h('span', { class: 'elapsed' }, '0s');
+      const note = h('p', { class: 'wait-note' }, 'This can take up to a minute. Please keep this page open.');
+      body.replaceChildren(
+        h('div', { class: 'working-ic', html: icon('logo', 44) }),
+        h('h2', null, title),
+        h('div', { class: 'thinking working' }, label, elapsed),
+        note);
+      foot.replaceChildren();
+      const started = Date.now();
+      let step = 0;
+      const timer = setInterval(() => {
+        const secs = Math.floor((Date.now() - started) / 1000);
+        elapsed.textContent = `${secs}s`;
+        const next = Math.min(Math.floor(secs / 7), steps.length - 1);
+        if (next !== step) { step = next; label.textContent = steps[step]; }
+        if (secs >= 45) note.textContent = 'Still working — Microsoft is responding slowly. Hang tight.';
+      }, 1000);
+      return () => clearInterval(timer);
+    }
+
+    // Send the server's answer to the right screen.
+    function route(data) {
+      if (data.state === 'done') return close();
+      if (data.state === 'mfa') return drawMfa(data.error ?? '');
+      if (data.state === 'password') return drawPassword(data.error ?? '');
+      loginId = null;
+      return drawEmail(data.error ?? 'Sign-in failed');
+    }
+
+    function drawEmail(message = '') {
       const input = h('input', { type: 'email', value: store.get('email'), placeholder: 'name@company.com', autocomplete: 'username', 'aria-label': 'Email' });
       const go = async () => {
         const email = input.value.trim();
         if (!email) return;
         store.set('email', email);
-        error.textContent = '';
-        setBusy(true);
+        const stop = showWorking('Signing you in', WORKING.email);
         try {
-          const data = await postAuth('/api/auth/login', { email });
-          loginId = data.loginId;
-          if (data.state === 'done') return close();
-          if (data.state === 'mfa') return drawMfa();
-          if (data.state === 'error') { error.textContent = data.error ?? 'Sign-in failed'; return; }
-          drawPassword();
-        } catch (err) { error.textContent = err.message; }
-        finally { setBusy(false); }
+          const first = await postAuth('/api/auth/login', { email, async: true });
+          loginId = first.loginId;
+          const data = first.state === 'working' ? await pollFlow(loginId) : first;
+          stop();
+          route(data);
+        } catch (err) { stop(); drawEmail(err.message); }
       };
       input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') go(); });
+      error.textContent = message;
       body.replaceChildren(
         h('div', { html: icon('logo', 40) }), h('h2', null, 'Sign in to Copilot'),
-        h('p', null, 'Use your Microsoft account. The password is only needed again if the saved session has expired.'), input, error);
+        h('p', null, 'Use your Microsoft account. You will be asked for your password, and for a code if your account uses two-step verification.'), input, error);
       foot.replaceChildren(h('button', { class: 'btn accent', onclick: go }, 'Continue'));
       input.focus();
     }
 
-    function drawPassword() {
+    function drawPassword(message = '') {
       const input = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Password', 'aria-label': 'Password' });
       const go = async () => {
         const password = input.value;
         if (!password) return;
-        error.textContent = '';
-        setBusy(true);
+        const stop = showWorking('Signing you in', WORKING.password);
         try {
-          const data = await postAuth('/api/auth/password', { loginId, password });
-          if (data.state === 'done') return close();
-          if (data.state === 'mfa') return drawMfa();
-          error.textContent = data.error ?? 'Email or password was not accepted';
-          input.value = '';
-          input.focus();
-        } catch (err) { error.textContent = err.message; }
-        finally { setBusy(false); }
+          const first = await postAuth('/api/auth/password', { loginId, password, async: true });
+          const data = first.state === 'working' ? await pollFlow(loginId) : first;
+          stop();
+          route(data);
+        } catch (err) { stop(); drawPassword(err.message); }
       };
       input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') go(); });
+      error.textContent = message;
       body.replaceChildren(
         h('div', { html: icon('logo', 40) }), h('h2', null, 'Enter your password'),
         h('p', null, store.get('email') || 'Microsoft account'), input, error);
@@ -847,23 +987,20 @@
     }
 
     function drawMfa(message = '') {
-      error.textContent = message;
       const input = h('input', { inputmode: 'numeric', maxlength: 6, placeholder: '000000', autocomplete: 'one-time-code', 'aria-label': 'Verification code' });
       const go = async () => {
         const code = input.value.trim();
         if (!code) return;
-        error.textContent = '';
-        setBusy(true);
+        const stop = showWorking('Verifying', WORKING.mfa);
         try {
-          const data = await postAuth('/api/auth/mfa', { loginId, code });
-          if (data.state === 'done') return close();
-          error.textContent = data.error ?? 'Code not accepted';
-          input.value = '';
-          input.focus();
-        } catch (err) { error.textContent = err.message; }
-        finally { setBusy(false); }
+          const first = await postAuth('/api/auth/mfa', { loginId, code, async: true });
+          const data = first.state === 'working' ? await pollFlow(loginId) : first;
+          stop();
+          route(data);
+        } catch (err) { stop(); drawMfa(err.message); }
       };
       input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') go(); });
+      error.textContent = message;
       body.replaceChildren(
         h('div', { html: icon('shield', 40) }), h('h2', null, 'Two-step verification'),
         h('p', null, 'Enter the 6-digit code from your Microsoft Authenticator app.'), input, error);
@@ -880,7 +1017,7 @@
       initSignedIn();
     }
 
-    drawEmail();
+    drawEmail(message);
   }
 
   // ---------- settings ----------
@@ -1065,6 +1202,7 @@
     const description = h('input', { type: 'text', maxlength: 120, value: mode.description });
     const prompt = h('textarea', { maxlength: 1500 });
     prompt.value = mode.prompt;
+    const tone = h('input', { type: 'text', maxlength: 120, value: mode.tone ?? '', placeholder: 'Magic' });
     const timeout = h('input', { type: 'number', min: 10, max: 1800, value: Math.round(mode.timeoutMs / 1000) });
     const add = h('textarea', { class: 'mono' });
     add.value = mode.addOptionsSets.join('\n');
@@ -1076,6 +1214,7 @@
     const node = h('div', { class: 'mode-card' },
       h('h4', null, id === 'quick' ? 'Quick response' : 'Think deeper'),
       field('Label', label), field('Description', description),
+      field('Tone', tone, 'The model mode on the wire. GPT-5.6: "Gpt_5_6_Chat" = quick, "Gpt_5_6_Reasoning" = think. Leave blank for the Copilot default ("Magic").'),
       field('Extra instructions for this mode', prompt, 'Added to the system prompt when this mode is selected.'),
       field('Idle timeout (seconds)', timeout, 'How long to wait with no frames from Copilot before giving up.'),
       h('details', { class: 'adv' }, h('summary', null, 'Copilot request overrides'),
@@ -1085,7 +1224,7 @@
     return {
       node,
       get: () => ({
-        label: label.value, description: description.value, prompt: prompt.value,
+        label: label.value, description: description.value, prompt: prompt.value, tone: tone.value.trim(),
         timeoutMs: Number(timeout.value) * 1000,
         addOptionsSets: lines(add.value), removeOptionsSets: lines(remove.value),
         argOverrides: args.get(), messageOverrides: message.get(), urlParams: urlParams.get(),

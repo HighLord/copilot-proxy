@@ -73,7 +73,7 @@ function buildOptionsSets(mode) {
   return [...new Set([...config.OPTIONS_SETS.filter((option) => !removed.has(option)), ...(mode.addOptionsSets ?? [])])];
 }
 
-function buildChatArguments({ prompt, requestId, sessionId, mode }) {
+function buildChatArguments({ prompt, requestId, sessionId, mode, messageAnnotations = [] }) {
   const clientInfo = { ...config.CLIENT_INFO, clientSessionId: sessionId };
   const args = {
     source: 'officeweb',
@@ -101,13 +101,17 @@ function buildChatArguments({ prompt, requestId, sessionId, mode }) {
       messageType: 'Chat',
       experienceType: 'Default',
       adaptiveCards: [],
+      messageAnnotations: Array.isArray(messageAnnotations) ? messageAnnotations : [],
       clientPreferences: {},
       connectedFederatedConnections: ['dummyId'],
       clientInfo,
     },
     plugins: [{ Id: 'BingWebSearch', Source: 'BuiltIn' }],
     isSbsSupported: true,
-    tone: 'Magic',
+    // The `tone` field is what actually selects the model mode on the wire (captured from the
+    // browser): "Gpt_5_6_Chat" = quick response, "Gpt_5_6_Reasoning" = think. argOverrides can
+    // still override it below (an admin escape hatch for a future/other model tone).
+    tone: mode.tone || 'Magic',
     renderReferencesBehindEOS: true,
     disconnectBehavior: 'continue',
   };
@@ -131,7 +135,7 @@ function encodeFrame(payload) {
  * Calls onDelta(text) for each chunk and resolves with the full reply text.
  * Opens one socket per turn, matching what the browser does.
  */
-function streamChat({ session, prompt, conversationId, onDelta, onStatus, signal, mode = {} }) {
+function streamChat({ session, prompt, conversationId, onDelta, onStatus, signal, mode = {}, messageAnnotations = [] }) {
   return new Promise((resolve, reject) => {
     const requestId = randomUUID().replaceAll('-', '');
     const sessionId = randomUUID();
@@ -230,7 +234,7 @@ function streamChat({ session, prompt, conversationId, onDelta, onStatus, signal
           handshakeDone = true;
           socket.send(encodeFrame({ type: config.SIGNALR_TYPE_PING }));
           const invocation = {
-            arguments: [buildChatArguments({ prompt, requestId, sessionId, mode })],
+            arguments: [buildChatArguments({ prompt, requestId, sessionId, mode, messageAnnotations })],
             invocationId: '0',
             target: CHAT_MESSAGE_TARGET,
             type: config.SIGNALR_TYPE_INVOCATION,
@@ -306,4 +310,4 @@ function streamChat({ session, prompt, conversationId, onDelta, onStatus, signal
   });
 }
 
-module.exports = { streamChat, CopilotError };
+module.exports = { streamChat, CopilotError, buildChatArguments };

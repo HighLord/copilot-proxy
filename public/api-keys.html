@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API keys</title>
+<style>
+  :root { --bg: #fff; --fg: #1a1a1a; --muted: #666; --line: #ddd; --card: #f6f6f6; --accent: #0b57d0; --danger: #b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161616; --fg: #eee; --muted: #aaa; --line: #333; --card: #222; --accent: #8ab4f8; --danger: #f2b8b5; } }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; max-width: 760px; margin-inline: auto; }
+  h1 { font-size: 1.4rem; } h2 { font-size: 1.1rem; margin-top: 2rem; }
+  a { color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 10px 0; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input[type=text] { flex: 1 1 200px; padding: 10px; font-size: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
+  button { padding: 10px 14px; font-size: 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--fg); }
+  button.danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+  code, pre { font-family: ui-monospace, monospace; font-size: 14px; }
+  pre { background: var(--card); border: 1px solid var(--line); padding: 10px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .newkey { border-color: var(--accent); }
+</style>
+</head>
+<body>
+<h1>API keys</h1>
+<p class="muted">Keys let tools such as OpenCode, Hermes or Claude Code use your signed-in Copilot session through this server. Treat a key like a password.</p>
+<div id="gate" class="card" hidden></div>
+<div id="app" hidden>
+  <div class="card">
+    <div class="row">
+      <input id="label" type="text" maxlength="60" placeholder="Name for this key, e.g. OpenCode on laptop" autocomplete="off">
+      <button id="create" type="button">Create key</button>
+    </div>
+    <div id="message" class="muted"></div>
+  </div>
+  <div id="fresh" class="card newkey" hidden>
+    <strong>Copy this key now. It will not be shown again.</strong>
+    <pre id="freshKey"></pre>
+    <button id="copy" class="secondary" type="button">Copy</button>
+  </div>
+  <h2>Your keys</h2>
+  <div id="list"></div>
+  <h2>Connect a tool</h2>
+  <p><strong>OpenAI-compatible tools</strong> (OpenCode, Hermes, most others)</p>
+  <pre id="openaiHelp"></pre>
+  <p><strong>Claude Code</strong> (Anthropic-compatible)</p>
+  <pre id="anthropicHelp"></pre>
+  <p class="muted">Any model name is accepted. <code>copilot</code> = GPT-5.6 quick, <code>copilot-deep</code> = GPT-5.6 think (aliases: <code>gpt-5.6</code>, <code>gpt-5.6-think</code>, <code>copilot-think</code>). A name containing <code>deep</code>, <code>think</code> or <code>reason</code> also selects think mode. If a tool reports a sign-in error, sign in again on the main page; your keys keep working.</p>
+  <h2>Attachments</h2>
+  <p class="muted">To have Copilot read a file, upload it with <code>POST /v1/files?filename=name.pdf</code> (raw bytes in the body), then pass the returned <code>id</code> back in the <code>attachments</code> array of a chat request, e.g. <code>{"attachments":[{"id":"SPO_…","name":"name.pdf","url":"https://…"}]}</code>. Files go to the "Microsoft Copilot Chat Files" library.</p>
+</div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const origin = location.origin;
+  $('openaiHelp').textContent = `Base URL: ${origin}/v1\nAPI key:  <your key>\nModel:    copilot`;
+  $('anthropicHelp').textContent = `export ANTHROPIC_BASE_URL=${origin}\nexport ANTHROPIC_AUTH_TOKEN=<your key>`;
+
+  async function call(method, url, body) {
+    const response = await fetch(url, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+    return data;
+  }
+
+  const when = (iso) => (iso ? new Date(iso).toLocaleString() : 'never');
+
+  async function refresh() {
+    const { keys } = await call('GET', '/api/keys');
+    const list = $('list');
+    list.textContent = '';
+    if (keys.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'muted';
+      empty.textContent = 'No keys yet.';
+      list.appendChild(empty);
+      return;
+    }
+    for (const key of keys) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const title = document.createElement('strong');
+      title.textContent = key.label;
+      const meta = document.createElement('div');
+      meta.className = 'muted';
+      meta.textContent = `${key.prefix}...  created ${when(key.createdAt)}  last used ${when(key.lastUsedAt)}`;
+      const revoke = document.createElement('button');
+      revoke.className = 'danger';
+      revoke.type = 'button';
+      revoke.textContent = 'Revoke';
+      revoke.addEventListener('click', async () => {
+        if (!confirm(`Revoke "${key.label}"? Tools using it will stop working.`)) return;
+        try { await call('DELETE', `/api/keys/${key.id}`); await refresh(); } catch (error) { $('message').textContent = error.message; }
+      });
+      card.append(title, meta, revoke);
+      list.appendChild(card);
+    }
+  }
+
+  $('create').addEventListener('click', async () => {
+    $('message').textContent = '';
+    try {
+      const created = await call('POST', '/api/keys', { label: $('label').value });
+      $('freshKey').textContent = created.key;
+      $('fresh').hidden = false;
+      $('label').value = '';
+      await refresh();
+    } catch (error) {
+      $('message').textContent = error.message;
+    }
+  });
+
+  $('copy').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText($('freshKey').textContent); $('copy').textContent = 'Copied'; }
+    catch { $('message').textContent = 'Copy failed. Press and hold the key to select it.'; }
+  });
+
+  (async () => {
+    try {
+      const status = await call('GET', '/api/auth/status');
+      if (!status.signedIn) throw new Error('not signed in');
+      $('app').hidden = false;
+      await refresh();
+    } catch {
+      $('gate').hidden = false;
+      const link = document.createElement('a');
+      link.href = '/';
+      link.textContent = 'Sign in on the main page';
+      $('gate').append(link, ' first, then come back here.');
+    }
+  })();
+})();
+</script>
+</body>
+</html>

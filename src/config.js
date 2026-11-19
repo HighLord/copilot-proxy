@@ -54,6 +54,9 @@ module.exports = Object.freeze({
   MOCK: process.env.COPILOT_MOCK === '1',
   // COPILOT_DEBUG_FRAMES=1 writes every SignalR frame to DATA_DIR/debug/*.jsonl (access_token is never logged).
   DEBUG_FRAMES: process.env.COPILOT_DEBUG_FRAMES === '1',
+  // COPILOT_DEBUG_SCREENSHOTS=1 saves sign-in page screenshots to ./tmp. Off by default: they can show an
+  // email address or a signed-in chat, and concurrent users share the same filenames.
+  DEBUG_SCREENSHOTS: process.env.COPILOT_DEBUG_SCREENSHOTS === '1',
   VARIANTS: process.env.COPILOT_VARIANTS ?? '',
   TIME_ZONE: process.env.COPILOT_TIME_ZONE ?? 'UTC',
   TIME_ZONE_OFFSET: Number(process.env.COPILOT_TIME_ZONE_OFFSET ?? 0),
@@ -67,6 +70,17 @@ module.exports = Object.freeze({
   MAX_PROMPT_CHARS: 8_000,
   TOKEN_EXPIRY_SKEW_SECONDS: 60,
   JSON_BODY_LIMIT: '64kb',
+
+  // ---- API for external tools (OpenAI- and Anthropic-compatible, served under /v1) ----
+  API_JSON_BODY_LIMIT: '8mb',
+  // Copilot takes one bounded message per turn, so a harness's context is trimmed to fit.
+  // Raise COPILOT_API_MAX_PROMPT_CHARS only after testing what Copilot really accepts.
+  API_MAX_PROMPT_CHARS: Number(process.env.COPILOT_API_MAX_PROMPT_CHARS) || 8_000,
+  API_MAX_CONCURRENT_PER_USER: 3,
+  API_MAX_KEYS_PER_USER: 10,
+  // Copilot features a harness must not trigger: its code sandbox, and the memory writer/reader
+  // (so harness traffic never ends up in, or draws on, the person's own Copilot memory).
+  API_DISABLED_OPTIONS_PATTERN: /code_interpreter|^update_memory_plugin$|^enable_inferred_memory_read$/,
   SSE_HEARTBEAT_MS: 15_000,
 
   MAX_SYSTEM_PROMPT_CHARS: 3_000,
@@ -86,6 +100,24 @@ module.exports = Object.freeze({
   HEADLESS: process.env.COPILOT_HEADLESS === '1',
   LOGIN_STEP_TIMEOUT_MS: 60_000,
   TOKEN_CAPTURE_TIMEOUT_MS: 60_000,
+  // A sign-in attempt left waiting on the person (password or code screen) is closed after this long,
+  // so an abandoned attempt cannot keep a Chromium open on the server indefinitely.
+  LOGIN_IDLE_TIMEOUT_MS: 5 * 60_000,
+  LOGIN_IDLE_CHECK_INTERVAL_MS: 60_000,
+  // Every sign-in is a whole Chromium. Raise COPILOT_MAX_LOGINS only if the server has the memory for it.
+  MAX_CONCURRENT_LOGINS: Number(process.env.COPILOT_MAX_LOGINS) || 2,
+
+  // ---- file uploads (attachments Copilot can actually read) ----
+  // The Chathub chat token has no Files scope, so uploads go through Graph using the M365Chat
+  // client's own refresh token (captured from MSAL at sign-in). Values copied from the browser.
+  UPLOAD_CLIENT_ID: 'c0ab8ce9-e9a0-42e7-b064-33d422df41f1',
+  UPLOAD_REDIRECT_URI: 'brk-multihub://outlook.office.com',
+  GRAPH_BASE_URL: 'https://graph.microsoft.com/v1.0',
+  LOGIN_AUTHORITY: 'https://login.microsoftonline.com',
+  // Copilot's upload folder is the "copilotuploads" special folder (→ "Microsoft Copilot Chat Files").
+  UPLOAD_FOLDER_PATH: 'copilotuploads',
+  MAX_UPLOAD_BYTES: Number(process.env.COPILOT_MAX_UPLOAD_BYTES) || 100 * 1024 * 1024,
+  GRAPH_TOKEN_EXPIRY_SKEW_SECONDS: 120,
 
   SESSION_COOKIE_NAME: 'cp_session',
   SESSION_TTL_MS: 30 * 24 * 60 * 60 * 1000,

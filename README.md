@@ -20,6 +20,35 @@ The `access_token` is a short-lived credential and is stored on disk under
 `data/auth/sessions/` so the server can keep working across restarts. Treat the `data/`
 directory as secret.
 
+## Model selection
+
+The chat mode (Quick / Think) maps to Copilot's `tone` field on the wire, captured from the
+browser: `Gpt_5_6_Chat` = quick response, `Gpt_5_6_Reasoning` = think. Both report the model
+identity "GPT-5.6" — think vs quick is a reasoning-mode switch, not a different base model. The
+tone is editable per mode in the Admin panel.
+
+Over the API, any model name is accepted: `copilot` / `gpt-5.6` = quick, `copilot-deep` /
+`gpt-5.6-think` / `copilot-think` = think (any name containing `deep`/`think`/`reason` also picks
+think). The selected model is echoed back in responses.
+
+## Reasoning / thinking
+
+Copilot does not stream chain-of-thought, but it does emit progress and search status messages.
+Those are surfaced as "reasoning": the chat UI shows them in a collapsible *Thought process*
+block, the OpenAI-compatible API streams them as `delta.reasoning_content` (and
+`message.reasoning_content` non-streaming), and the Anthropic-compatible API emits `thinking`
+blocks.
+
+## File attachments
+
+Copilot has no direct file upload over the WebSocket. Files are uploaded to the "Microsoft
+Copilot Chat Files" library via Graph, then referenced in the message as a `LocalFile` annotation
+(the exact annotation id format was reverse-engineered from a captured session and is verified by
+the test suite). Upload with `POST /v1/files?filename=name.pdf` (raw bytes) or
+`POST /api/upload?name=name.pdf`; pass the returned annotation through the `attachments` array of
+a chat request. Uploads require the M365Chat refresh token (captured from MSAL at sign-in) to
+obtain a Files-scoped Graph token.
+
 ## Requirements
 
 - Node.js >= 20.6

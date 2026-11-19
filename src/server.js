@@ -12,6 +12,9 @@ const conversations = require('./conversationStore');
 const adminStore = require('./adminStore');
 const userStore = require('./userStore');
 const { buildPreamble, composeMessage, hashText } = require('./prompts');
+const apiKeys = require('./apiKeys');
+const { createCompatRouter } = require('./compatApi');
+const { uploadFile } = require('./upload');
 
 const { streamChat, CopilotError } = config.MOCK ? mockClient : realClient;
 
@@ -25,6 +28,18 @@ const { UUID_PATTERN } = conversations;
 
 const app = express();
 app.disable('x-powered-by');
+
+// The tool API (OpenAI- and Anthropic-compatible) reads its own, much larger request bodies,
+// so it is mounted before the small-limit JSON parser below.
+app.use('/v1', createCompatRouter({
+  streamChat,
+  getSession: auth.getSession,
+  getAdmin: adminStore.getAdmin,
+  authenticate: apiKeys.authenticate,
+  uploadFile,
+  mock: config.MOCK,
+}));
+
 app.use(express.json({ limit: config.JSON_BODY_LIMIT }));
 
 // ---------- session cookie ----------
@@ -117,7 +132,8 @@ app.get('/api/auth/status', (req, res) => {
 app.post('/api/auth/login', handler(async (req, res) => {
   const email = String(req.body?.email ?? '').trim();
   if (!EMAIL_RE.test(email)) throw httpError(HTTP_BAD_REQUEST, 'Enter a valid email address');
-  const flow = await auth.startLogin(email);
+  // { async: true } returns at once with state "working"; poll GET /api/auth/flow/:id for the outcome.
+  const flow = req.body?.async ? await auth.startLoginBackground(email) : await auth.startLogin(email);
   if (flow.state === 'done') setSessionCookie(res, flow.email);
   res.json({ loginId: flow.id, state: flow.state, email: flow.email, name: flow.name, error: flow.error });
 }));
@@ -125,7 +141,7 @@ app.post('/api/auth/login', handler(async (req, res) => {
 app.post('/api/auth/password', handler(async (req, res) => {
   const { loginId, password } = req.body ?? {};
   if (!loginId || typeof password !== 'string' || !password) throw httpError(HTTP_BAD_REQUEST, 'Password required');
-  const flow = await auth.submitPassword(loginId, password);
+  const flow = req.body?.async ? auth.submitPasswordBackground(loginId, password) : await auth.submitPassword(loginId, password);
   if (flow.state === 'done') setSessionCookie(res, flow.email);
   res.json({ state: flow.state, email: flow.email, name: flow.name, error: flow.error });
 }));
@@ -133,10 +149,21 @@ app.post('/api/auth/password', handler(async (req, res) => {
 app.post('/api/auth/mfa', handler(async (req, res) => {
   const { loginId, code } = req.body ?? {};
   if (!loginId || typeof code !== 'string' || !code.trim()) throw httpError(HTTP_BAD_REQUEST, 'Code required');
-  const flow = await auth.submitMfa(loginId, code.trim());
+  const flow = req.body?.async ? auth.submitMfaBackground(loginId, code.trim()) : await auth.submitMfa(loginId, code.trim());
   if (flow.state === 'done') setSessionCookie(res, flow.email);
   res.json({ state: flow.state, email: flow.email, name: flow.name, error: flow.error });
 }));
+
+// Progress of a sign-in started with { async: true }. The loginId is an unguessable UUID, the same
+// secret the password and MFA endpoints already rely on, and the session cookie is issued here once done.
+app.get('/api/auth/flow/:loginId', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!UUID_PATTERN.test(req.params.loginId)) throw httpError(HTTP_BAD_REQUEST, 'loginId must be a UUID');
+  const flow = auth.getFlowState(req.params.loginId);
+  if (!flow) throw httpError(HTTP_NOT_FOUND, 'Login session not found — start again');
+  if (flow.state === 'done') setSessionCookie(res, flow.email);
+  res.json({ state: flow.state, email: flow.email, name: flow.name, error: flow.error });
+});
 
 app.post('/api/auth/cancel', (req, res) => {
   auth.cancel(req.body?.loginId);
@@ -228,6 +255,36 @@ api.delete('/memories', (req, res) => {
   res.json({ ok: true });
 });
 
+api.get('/keys', (req, res) => res.json({ keys: apiKeys.listKeys(req.userEmail) }));
+api.post('/keys', (req, res) => res.status(201).json(apiKeys.createKey(req.userEmail, req.body?.label)));
+api.delete('/keys/:id', (req, res) => {
+  if (!apiKeys.revokeKey(req.userEmail, req.params.id)) throw httpError(HTTP_NOT_FOUND, 'Key not found');
+  res.json({ ok: true });
+});
+
+// Upload a file to the Copilot uploads folder and get back the annotation used to attach it to a
+// chat message. The request body is the raw file bytes; the filename comes from the query string.
+api.post('/upload', express.raw({ type: () => true, limit: config.MAX_UPLOAD_BYTES }), handler(async (req, res) => {
+  const name = String(req.query?.name ?? '').trim();
+  if (!name) throw httpError(HTTP_BAD_REQUEST, 'name query parameter is required');
+  if (!req.body || req.body.length === 0) throw httpError(HTTP_BAD_REQUEST, 'Request body must be the file bytes');
+  if (config.MOCK) {
+    // Mock mode has no OneDrive; return a synthetic annotation so the UI flow can be exercised.
+    const annotation = { id: `SPO_mock_${crypto.randomUUID()}`, text: name, url: `https://example.com/${encodeURIComponent(name)}`, messageAnnotationType: 'LocalFile' };
+    res.status(201).json({ ok: true, name, url: annotation.url, annotation });
+    return;
+  }
+  let session;
+  try { session = auth.getSession(req.userEmail); } catch (error) { throw httpError(error.status ?? HTTP_UNAUTHORIZED, error.message); }
+  const result = await uploadFile({
+    session,
+    name,
+    data: req.body,
+    mimeType: (req.get('content-type') || 'application/octet-stream').split(';')[0],
+  });
+  res.status(201).json({ ok: true, name: result.name, url: result.url, annotation: result.annotation });
+}));
+
 app.use('/api', api);
 
 // ---------- admin ----------
@@ -254,7 +311,7 @@ function badRequest(res, message) {
 }
 
 app.post('/chat', requireSession, async (req, res) => {
-  const { prompt, conversationId: requestedId, mode: requestedMode } = req.body ?? {};
+  const { prompt, conversationId: requestedId, mode: requestedMode, attachments: rawAttachments } = req.body ?? {};
   const admin = adminStore.getAdmin();
 
   if (typeof prompt !== 'string' || prompt.trim() === '' || prompt.length > config.MAX_PROMPT_CHARS) {
@@ -269,6 +326,16 @@ app.post('/chat', requireSession, async (req, res) => {
     badRequest(res, `mode must be one of: ${Object.keys(admin.modes).join(', ')}`);
     return;
   }
+  // Attachments are LocalFile annotations produced by POST /api/upload. Each needs an id, a name
+  // and the file URL; messageAnnotationType is pinned to "LocalFile" so a caller cannot spoof it.
+  const messageAnnotations = (Array.isArray(rawAttachments) ? rawAttachments.slice(0, 20) : [])
+    .map((a) => ({
+      id: String(a?.id ?? '').trim(),
+      text: String(a?.name ?? a?.text ?? '').trim(),
+      url: String(a?.url ?? '').trim(),
+      messageAnnotationType: 'LocalFile',
+    }))
+    .filter((a) => a.id && a.text);
 
   let session;
   if (!config.MOCK) {
@@ -314,6 +381,7 @@ app.post('/chat', requireSession, async (req, res) => {
     }
 
     const userMessage = { id: crypto.randomUUID(), role: 'user', text: prompt, createdAt: new Date().toISOString() };
+    if (messageAnnotations.length) userMessage.attachments = messageAnnotations.map((a) => ({ name: a.text, url: a.url }));
     const assistantMessageId = crypto.randomUUID();
     await conversations.create(req.userEmail, conversationId);
     const afterUser = await conversations.mutate(req.userEmail, conversationId, (conv) => {
@@ -344,6 +412,7 @@ app.post('/chat', requireSession, async (req, res) => {
 
     const startedAt = Date.now();
     let text = '';
+    let reasoning = '';
     let outcome = 'complete';
     let failure = null;
     try {
@@ -352,12 +421,19 @@ app.post('/chat', requireSession, async (req, res) => {
         prompt: message,
         conversationId,
         mode: modeConfig,
+        messageAnnotations,
         signal: abortController.signal,
         onDelta: (delta) => {
           text += delta;
           sendSse(res, 'delta', { text: delta });
         },
-        onStatus: (status) => sendSse(res, 'status', status),
+        onStatus: (status) => {
+          // Copilot does not stream chain-of-thought; these progress/search messages are the
+          // closest thing to "thinking" it exposes. Accumulated so the UI can show a thought process.
+          reasoning += (reasoning ? '\n' : '') + status.text;
+          sendSse(res, 'status', status);
+          sendSse(res, 'reasoning', { text: status.text });
+        },
       });
     } catch (error) {
       failure = error;
@@ -384,6 +460,7 @@ app.post('/chat', requireSession, async (req, res) => {
         createdAt: new Date().toISOString(),
         durationMs: Date.now() - startedAt,
       };
+      if (reasoning) reply.reasoning = reasoning;
       if (outcome === 'error') reply.error = failure.message;
       conv.messages.push(reply);
       if (needsPreamble) conv.injectedHash = preambleHash;

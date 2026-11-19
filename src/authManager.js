@@ -9,9 +9,7 @@ const { writeJsonAtomicSync, readJsonSync } = require('./fsUtil');
 
 const AUTH_DIR = path.join(config.DATA_DIR, 'auth');
 const SESSIONS_DIR = path.join(AUTH_DIR, 'sessions');
-const PROFILES_DIR = path.join(AUTH_DIR, 'profiles');
 fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-fs.mkdirSync(PROFILES_DIR, { recursive: true });
 
 class NeedsLoginError extends Error {
   constructor(message) {
@@ -32,12 +30,21 @@ class LoginError extends Error {
 
 const emailKey = (email) => crypto.createHash('sha256').update(String(email).trim().toLowerCase()).digest('hex').slice(0, 32);
 const sessionFile = (email) => path.join(SESSIONS_DIR, `${emailKey(email)}.json`);
-const profileDir = (email) => path.join(PROFILES_DIR, emailKey(email));
 
 // lowercased email -> { oid, tid, exp, email, name, token, savedAt }
 const sessions = new Map();
 // loginId -> in-flight login flow
 const flows = new Map();
+// loginId -> flow that has ended (done or error). Kept briefly so a client polling for the outcome can
+// still read it after the flow has been closed.
+const finished = new Map();
+const FINISHED_TTL_MS = 5 * 60_000;
+const MOCK_STEP_DELAY_MS = 1500;
+
+// Marks a flow as just used, so the idle reaper measures from the person's last action.
+const touch = (flow) => { flow.lastActivity = Date.now(); };
+// Browsers being started right now are not in `flows` yet; counting them stops simultaneous requests slipping past the cap.
+let launching = 0;
 
 // ---------- session store ----------
 
@@ -64,7 +71,17 @@ function getSession(email) {
   const rec = sessions.get(String(email).toLowerCase());
   if (!rec) throw new NeedsLoginError('Not signed in');
   if (!sessionIsValid(rec)) throw new NeedsLoginError('Session expired — sign in again');
-  return { token: rec.token, oid: rec.oid, tid: rec.tid, email: rec.email };
+  return {
+    token: rec.token,
+    oid: rec.oid,
+    tid: rec.tid,
+    email: rec.email,
+    // Optional upload tokens (only present when captured at sign-in).
+    refreshToken: rec.refreshToken ?? null,
+    graphToken: rec.graphToken ?? null,
+    graphTokenExp: rec.graphTokenExp ?? null,
+    spoHost: rec.spoHost ?? null,
+  };
 }
 
 function getStatus(email) {
@@ -107,11 +124,11 @@ function finishMock(flow) {
   flow.state = 'done';
   flow.email = rec.email;
   flow.name = rec.name;
-  return flow;
+  return endFlow(flow);
 }
 
 function startMockLogin(email) {
-  const flow = { id: crypto.randomUUID(), email, state: 'password', mock: true };
+  const flow = { id: crypto.randomUUID(), email, state: 'password', mock: true, lastActivity: Date.now() };
   flows.set(flow.id, flow);
   return flow;
 }
@@ -221,6 +238,16 @@ async function clickYes(page) {
   }).catch(() => false);
 }
 
+// Screenshots can show an email address or a signed-in chat, so they are only taken when explicitly enabled.
+async function debugScreenshot(page, name) {
+  if (!config.DEBUG_SCREENSHOTS) return;
+  try {
+    const dir = path.join(__dirname, '..', 'tmp');
+    fs.mkdirSync(dir, { recursive: true });
+    await page.screenshot({ path: path.join(dir, name) });
+  } catch { /* a failed debug screenshot must never break sign-in */ }
+}
+
 async function submit(page) {
   const next = page.locator('#idSIButton9');
   if (await next.count()) { await next.first().click(); return; }
@@ -229,22 +256,35 @@ async function submit(page) {
   else await page.keyboard.press('Enter');
 }
 
+// Every sign-in gets its own throw-away browser with a fresh, non-persistent context (the equivalent
+// of a private window). No cookies or remembered accounts survive between sign-ins, so one person's
+// Microsoft session can never be picked up by the next person who signs in. The captured Copilot
+// token is stored server-side in the session store, so nothing needs to persist in the browser.
 async function launchReal(email) {
-  const chromium = playwright().chromium;
-  const context = await chromium.launchPersistentContext(profileDir(email), {
-    headless: config.HEADLESS,
-    viewport: { width: 1280, height: 900 },
-    userAgent: config.USER_AGENT,
-    locale: 'en-US',
-    args: ['--no-sandbox'],
-  });
-  const page = context.pages()[0] ?? await context.newPage();
-  const flow = { id: crypto.randomUUID(), email, state: 'running', mock: false, context, page, wsUrl: null, reqUrl: null, idToken: null, round: 0 };
+  const browser = await playwright().chromium.launch({ headless: config.HEADLESS, args: ['--no-sandbox'] });
+  let context;
+  let page;
+  try {
+    context = await browser.newContext({
+      viewport: { width: 1280, height: 900 },
+      userAgent: config.USER_AGENT,
+      locale: 'en-US',
+    });
+    page = await context.newPage();
+  } catch (error) {
+    await browser.close().catch(() => {});
+    throw error;
+  }
+  const flow = { id: crypto.randomUUID(), email, state: 'running', mock: false, browser, context, page, wsUrl: null, reqUrl: null, idToken: null, round: 0, lastActivity: Date.now() };
   flows.set(flow.id, flow);
 
   // The Chathub WebSocket URL carries the access_token we need.
   page.on('websocket', (ws) => {
-    if (ws.url().includes(config.CHATHUB_WS_HOST) && !flow.wsUrl) flow.wsUrl = ws.url();
+    try { const u = new URL(ws.url()); console.log('[auth-debug] websocket:', u.host + u.pathname, 'has_access_token=' + u.searchParams.has('access_token')); } catch {}
+    if (ws.url().includes(config.CHATHUB_WS_HOST) && /\/Chathub\//i.test(ws.url()) && /[?&]access_token=/.test(ws.url()) && !flow.wsUrl) flow.wsUrl = ws.url();
+  });
+  page.on('request', (req) => {
+    try { const u = new URL(req.url()); if (u.searchParams.has('access_token')) console.log('[auth-debug] request with access_token:', u.host + u.pathname); } catch {}
   });
   page.on('request', (req) => {
     const u = req.url();
@@ -272,7 +312,7 @@ async function settle(flow) {
   if (await hasOtpField(page)) { flow.state = 'mfa'; console.log('[auth] Two-step verification required'); return flow; }
   if (await hasEmailField(page)) {
     const input = page.locator('input[type="email"]:visible').first();
-    // Always overwrite: a stale remembered value in the profile surfaces as "invalid email".
+    // Always overwrite: the field can arrive pre-filled, and a wrong pre-filled value surfaces as "invalid email".
     await input.fill(flow.email);
     console.log('[auth] Submitting email…');
     await submit(page);
@@ -285,7 +325,7 @@ async function settle(flow) {
         const el = document.querySelector('#usernameError, [id*="usernameError"], [role="alert"]');
         return el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '';
       }).catch(() => '');
-      await page.screenshot({ path: path.join(__dirname, '..', 'tmp', 'emailerror.png') }).catch(() => {});
+      await debugScreenshot(page, 'emailerror.png');
       console.log('[auth] Email error:', errText || '(none)');
       flow.state = 'error';
       flow.error = errText || 'Sign-in did not accept that email address';
@@ -294,7 +334,7 @@ async function settle(flow) {
     return settle(flow);
   }
   if (await hasPasswordField(page)) {
-    await page.screenshot({ path: path.join(__dirname, '..', 'tmp', 'step_password.png') }).catch(() => {});
+    await debugScreenshot(page, 'step_password.png');
     flow.state = 'password';
     console.log('[auth] Password required');
     return flow;
@@ -314,11 +354,49 @@ async function settle(flow) {
   return endFlow(flow);
 }
 
+// Open the Chathub socket by sending a short message. Uses focus() instead of a mouse click,
+// because an overlay on the page can intercept clicks and make them time out.
+async function nudgeChat(flow) {
+  const page = flow.page;
+  await debugScreenshot(page, 'nudge.png');
+  const info = await page.evaluate(() => {
+    const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const desc = (el) => `${el.tagName.toLowerCase()} role=${el.getAttribute('role') || ''} aria="${el.getAttribute('aria-label') || ''}"`;
+    return {
+      url: location.href,
+      boxes: Array.from(document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')).filter(vis).map(desc),
+      dialogs: Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]')).filter(vis).map((el) => (el.innerText || '').replace(/\s+/g, ' ').slice(0, 120)),
+    };
+  }).catch(() => null);
+  console.log('[auth-debug] chat page:', JSON.stringify(info));
+  try {
+    await page.keyboard.press('Escape'); // dismiss any popup in the way
+    const focused = await page.evaluate(() => {
+      const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      const boxes = Array.from(document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')).filter(vis);
+      boxes.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+      if (!boxes[0]) return false;
+      boxes[0].focus();
+      return true;
+    });
+    if (!focused) { console.log('[auth] No chat box found to send the trigger message'); return; }
+    await page.keyboard.type('hi', { delay: 60 });
+    await page.keyboard.press('Enter');
+    console.log('[auth] Trigger message sent');
+  } catch (e) { console.log('[auth] Could not send trigger message:', e.message); }
+}
+
 async function capture(flow) {
   const page = flow.page;
   // Wait for the SPA to open the Chathub WebSocket (or fetch a URL that carries the token).
   let tokenUrl = flow.wsUrl || flow.reqUrl;
   if (!tokenUrl) {
+    try { tokenUrl = await waitFor(() => flow.wsUrl || flow.reqUrl, 15_000); } catch { tokenUrl = null; }
+  }
+  if (!tokenUrl) {
+    // The Chathub socket may only open once a message is sent, so send a short one to trigger it.
+    console.log('[auth] No Chathub socket yet — sending a message to open it');
+    await nudgeChat(flow);
     try { tokenUrl = await waitFor(() => flow.wsUrl || flow.reqUrl, config.TOKEN_CAPTURE_TIMEOUT_MS); } catch { tokenUrl = null; }
   }
   if (tokenUrl) {
@@ -354,22 +432,114 @@ function finishReal(flow, token) {
   flow.email = rec.email;
   flow.name = rec.name;
   console.log(`[auth] Signed in as ${rec.email} — token captured (expires ${rec.exp ? new Date(rec.exp * 1000).toISOString() : 'unknown'})`);
+  // Best-effort: also grab the MSAL refresh token and a Files-scoped Graph token so file uploads
+  // work later. These are additive — a failure here must never fail the sign-in itself.
+  scanMsal(flow)
+    .then((extras) => {
+      if (!extras.refreshToken && !extras.graphToken) return;
+      const current = sessions.get(rec.email);
+      if (!current) return;
+      const merged = { ...current };
+      if (extras.refreshToken) merged.refreshToken = extras.refreshToken;
+      if (extras.graphToken) { merged.graphToken = extras.graphToken; merged.graphTokenExp = extras.graphTokenExp ?? null; }
+      if (extras.spoHost) merged.spoHost = extras.spoHost;
+      saveSession(merged);
+      console.log(`[auth] Captured upload tokens for ${rec.email} (refresh=${Boolean(extras.refreshToken)}, graph=${Boolean(extras.graphToken)})`);
+    })
+    .catch((error) => console.log(`[auth] Could not capture upload tokens: ${error.message}`));
   return endFlow(flow);
 }
 
-// Close the browser (flushing cookies to the persistent profile) and drop the flow.
+// Scans the browser's MSAL cache for a refresh token and a Files-scoped Graph/SharePoint access
+// token. The Chathub chat token has no Files scope, so uploads need one of these.
+async function scanMsal(flow) {
+  const page = flow.page;
+  if (!page) return {};
+  const found = await page.evaluate(() => {
+    const out = { refresh: null, jwts: [], spoHost: null };
+    try {
+      for (const store of [localStorage, sessionStorage]) {
+        for (let i = 0; i < store.length; i += 1) {
+          let key; let value;
+          try { key = store.key(i); value = store.getItem(key); } catch { continue; }
+          if (!key || !value) continue;
+          if (!out.refresh && /refreshtoken/i.test(key)) out.refresh = value;
+          if (value.split('.').length === 3 && value.length > 120) out.jwts.push(value);
+          if (!out.spoHost) {
+            const match = key.match(/([a-z0-9.-]+-my\.sharepoint\.com)/i);
+            if (match) out.spoHost = match[1].toLowerCase();
+          }
+        }
+      }
+    } catch { /* storage access can throw on some pages */ }
+    return out;
+  }).catch(() => ({ refresh: null, jwts: [], spoHost: null }));
+
+  const result = { refreshToken: found?.refresh ?? null, graphToken: null, graphTokenExp: null, spoHost: found?.spoHost ?? null };
+  for (const jwt of found?.jwts ?? []) {
+    try {
+      const c = parseClaims(jwt);
+      const scp = `${c.scp ?? ''} ${c.roles ?? ''}`.toLowerCase();
+      const aud = String(c.aud ?? '').toLowerCase();
+      const isFiles = /files\.readwrite|myfiles\.(read|write)|sites\.readwrite/i.test(scp);
+      const isGraph = /graph\.microsoft\.com|sharepoint/i.test(aud);
+      if (isFiles && (isGraph || scp.includes('files'))) {
+        result.graphToken = jwt;
+        result.graphTokenExp = c.exp ?? null;
+        break;
+      }
+    } catch { /* not a decodable JWT */ }
+  }
+  return result;
+}
+
+// Closing the browser discards the private context along with every cookie it held.
+function closeBrowser(flow) {
+  const { browser } = flow;
+  flow.browser = null;
+  flow.context = null;
+  if (browser) browser.close().catch(() => {});
+}
+
+// Close the browser and drop the flow.
 function endFlow(flow) {
   flows.delete(flow.id);
-  if (flow.context) { flow.context.close().catch(() => {}); flow.context = null; }
+  closeBrowser(flow);
+  finished.set(flow.id, flow);
+  setTimeout(() => finished.delete(flow.id), FINISHED_TTL_MS).unref();
   return flow;
 }
 
 // ---------- public API ----------
 
-async function startLogin(email) {
-  email = String(email).trim().toLowerCase();
-  if (config.MOCK) return startMockLogin(email);
-  const flow = await launchReal(email);
+// Opens the private browser for an email. Quick (a second or two); throws LoginError if it cannot start.
+async function openFlow(email) {
+  // Close any earlier browser still open for this email so abandoned attempts do not pile up.
+  for (const f of [...flows.values()]) {
+    if (!f.mock && f.email === email) {
+      flows.delete(f.id);
+      closeBrowser(f);
+    }
+  }
+  // Each sign-in is a whole Chromium, so a small server can only hold a few at once.
+  if (flows.size + launching >= config.MAX_CONCURRENT_LOGINS) {
+    throw new LoginError('Too many sign-ins are in progress. Please try again in a few minutes.');
+  }
+  let flow;
+  launching += 1;
+  try {
+    flow = await launchReal(email);
+  } catch (error) {
+    // Surface the real reason (for example Chromium not installed) instead of a generic server error.
+    throw new LoginError(`Could not start the sign-in browser: ${error.message.split('\n')[0]}`);
+  } finally {
+    launching -= 1;
+  }
+  return flow;
+}
+
+// The slow part: load the Microsoft page and work out which step it is on.
+async function navigateAndSettle(flow) {
   try {
     await flow.page.goto(config.LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: config.LOGIN_STEP_TIMEOUT_MS });
   } catch (e) {
@@ -380,9 +550,78 @@ async function startLogin(email) {
   return settle(flow);
 }
 
+async function startLogin(email) {
+  email = String(email).trim().toLowerCase();
+  if (config.MOCK) return startMockLogin(email);
+  return navigateAndSettle(await openFlow(email));
+}
+
+// ---------- background variants ----------
+// These return straight away with state "working" and keep going on the server. The client polls
+// getFlowState() until the state changes. No HTTP request has to stay open while Microsoft is slow,
+// which is what made phones show "Load failed".
+
+function runInBackground(flow, task) {
+  touch(flow);
+  flow.busy = true;
+  flow.state = 'working';
+  flow.error = undefined;
+  Promise.resolve()
+    .then(task)
+    .catch((error) => {
+      flow.state = 'error';
+      flow.error = error.message;
+      endFlow(flow);
+    })
+    .finally(() => {
+      flow.busy = false;
+      touch(flow);
+      if (flow.state === 'working') { flow.state = 'error'; flow.error = 'Sign-in did not finish'; endFlow(flow); }
+    });
+  return flow;
+}
+
+function getOpenFlow(loginId) {
+  const flow = flows.get(loginId);
+  if (!flow) {
+    // An attempt closed for being idle keeps its reason for a few minutes; show that instead of a generic message.
+    throw new LoginError(finished.get(loginId)?.error ?? 'Login session not found — start again');
+  }
+  if (flow.busy) throw new LoginError('Still working on the previous step');
+  return flow;
+}
+
+async function startLoginBackground(email) {
+  email = String(email).trim().toLowerCase();
+  if (config.MOCK) {
+    const flow = startMockLogin(email);
+    return runInBackground(flow, async () => { await sleep(MOCK_STEP_DELAY_MS); flow.state = 'password'; });
+  }
+  const flow = await openFlow(email);
+  return runInBackground(flow, () => navigateAndSettle(flow));
+}
+
+function submitPasswordBackground(loginId, password) {
+  const flow = getOpenFlow(loginId);
+  if (flow.mock) return runInBackground(flow, async () => { await sleep(MOCK_STEP_DELAY_MS); mockSubmitPassword(flow, password); });
+  return runInBackground(flow, () => submitPassword(loginId, password));
+}
+
+function submitMfaBackground(loginId, code) {
+  const flow = getOpenFlow(loginId);
+  if (flow.mock) return runInBackground(flow, async () => { await sleep(MOCK_STEP_DELAY_MS); mockSubmitMfa(flow, code); });
+  return runInBackground(flow, () => submitMfa(loginId, code));
+}
+
+// Current state of a flow, whether it is still open or has just ended. null if unknown or expired.
+function getFlowState(loginId) {
+  return flows.get(loginId) ?? finished.get(loginId) ?? null;
+}
+
 async function submitPassword(loginId, password) {
   const flow = flows.get(loginId);
   if (!flow) throw new LoginError('Login session not found — start again');
+  touch(flow);
   if (flow.mock) return mockSubmitPassword(flow, password);
   const page = flow.page;
   try {
@@ -408,7 +647,7 @@ async function submitPassword(loginId, password) {
         const el = document.querySelector('#passwordError, #usernameError, [id*="passwordError"], [id*="usernameError"], [role="alert"]');
         return el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '';
       }).catch(() => '');
-      await page.screenshot({ path: path.join(__dirname, '..', 'tmp', 'pwerror.png') }).catch(() => {});
+      await debugScreenshot(page, 'pwerror.png');
       console.log('[auth] Microsoft error:', errText || '(none)');
       flow.state = 'password';
       flow.error = errText || 'Email or password was not accepted';
@@ -436,6 +675,7 @@ async function submitPassword(loginId, password) {
 async function submitMfa(loginId, code) {
   const flow = flows.get(loginId);
   if (!flow) throw new LoginError('Login session not found — start again');
+  touch(flow);
   if (flow.mock) return mockSubmitMfa(flow, code);
   const page = flow.page;
   try {
@@ -469,8 +709,19 @@ function cancel(loginId) {
   const flow = flows.get(loginId);
   if (!flow) return;
   flows.delete(loginId);
-  if (!flow.mock && flow.context) {
-    flow.context.close().catch(() => {});
+  if (!flow.mock) closeBrowser(flow);
+}
+
+// Closes sign-in attempts that were started but then abandoned (tab closed, phone locked, person walked away).
+// A flow that is busy with a step is never touched: that step has its own timeouts and ends the flow itself.
+function reapIdleFlows() {
+  const cutoff = Date.now() - config.LOGIN_IDLE_TIMEOUT_MS;
+  for (const flow of [...flows.values()]) {
+    if (flow.busy || flow.lastActivity > cutoff) continue;
+    console.log(`[auth] Closing idle sign-in for ${flow.email} (no activity for ${Math.round(config.LOGIN_IDLE_TIMEOUT_MS / 60_000)} min)`);
+    flow.state = 'error';
+    flow.error = 'Sign-in timed out — start again';
+    endFlow(flow);
   }
 }
 
@@ -480,6 +731,8 @@ function dispose() {
 }
 
 loadSessions();
+// unref() so this timer alone never keeps the process alive during shutdown.
+setInterval(reapIdleFlows, config.LOGIN_IDLE_CHECK_INTERVAL_MS).unref();
 
 module.exports = {
   NeedsLoginError,
@@ -487,6 +740,10 @@ module.exports = {
   startLogin,
   submitPassword,
   submitMfa,
+  startLoginBackground,
+  submitPasswordBackground,
+  submitMfaBackground,
+  getFlowState,
   cancel,
   dispose,
   getSession,

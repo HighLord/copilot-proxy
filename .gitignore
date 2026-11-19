@@ -4,3 +4,7 @@ test-data*/
 .env
 *.tmp
 tmp/
+# dev snapshots, not part of the source
+*.bak
+*.pre-fix
+*.pre-api

@@ -21,6 +21,7 @@ function sanitizeMode(input, current, id) {
   if ('label' in input) next.label = checkString(input.label, 40, `modes.${id}.label`, { allowEmpty: false }).trim();
   if ('description' in input) next.description = checkString(input.description, 120, `modes.${id}.description`).trim();
   if ('prompt' in input) next.prompt = checkString(input.prompt, 1_500, `modes.${id}.prompt`);
+  if ('tone' in input) next.tone = checkString(input.tone, 120, `modes.${id}.tone`);
   if ('addOptionsSets' in input) next.addOptionsSets = checkStringList(input.addOptionsSets, `modes.${id}.addOptionsSets`);
   if ('removeOptionsSets' in input) next.removeOptionsSets = checkStringList(input.removeOptionsSets, `modes.${id}.removeOptionsSets`);
   for (const key of ['argOverrides', 'messageOverrides', 'urlParams']) {

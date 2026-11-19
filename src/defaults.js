@@ -4,6 +4,9 @@
 function defaultAdminSettings() {
   const baseMode = {
     prompt: '',
+    // The Copilot `tone` field in the chat invocation. This is what actually selects the model
+    // mode on the wire (captured from the browser): quick = Gpt_5_6_Chat, think = Gpt_5_6_Reasoning.
+    tone: '',
     // Applied on top of config.OPTIONS_SETS for this mode.
     addOptionsSets: [],
     removeOptionsSets: [],
@@ -19,14 +22,16 @@ function defaultAdminSettings() {
     modes: {
       quick: {
         ...baseMode,
+        tone: 'Gpt_5_6_Chat',
         label: 'Quick response',
-        description: 'Fast answers for everyday questions',
+        description: 'GPT-5.6 Sol quick response — fast answers for everyday questions',
         timeoutMs: 120_000,
       },
       deep: {
         ...baseMode,
+        tone: 'Gpt_5_6_Reasoning',
         label: 'Think deeper',
-        description: 'Takes longer to work through harder problems',
+        description: 'GPT-5.6 Sol think — takes longer to work through harder problems',
         timeoutMs: 300_000,
       },
     },
