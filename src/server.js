@@ -6,6 +6,7 @@ const express = require('express');
 const config = require('./config');
 const auth = require('./authManager');
 const { sign, verify } = require('./sessionSecret');
+const { parseClaims, identityFromClaims } = require('./identity');
 const realClient = require('./copilotClient');
 const mockClient = require('./mockClient');
 const conversations = require('./conversationStore');
@@ -130,9 +131,53 @@ app.get('/api/auth/status', (req, res) => {
   return res.json({ signedIn: st.set && !st.expired, email, name: st.name, expiresAt: st.expiresAt, mock: config.MOCK });
 });
 
+// Browser-extension session capture. The extension grabs the Copilot auth artifacts from the user's
+// own browser (Chathub access_token, copilot.cloud.microsoft cookies, MSAL refresh/Graph token) and
+// POSTs them here. No server-side Chromium is involved.
+app.post('/api/auth/client', handler(async (req, res) => {
+  if (config.CLIENT_CAPTURE_KEY && !safeEqual(req.get('x-client-key') ?? '', config.CLIENT_CAPTURE_KEY)) {
+    throw httpError(HTTP_FORBIDDEN, 'Client key required');
+  }
+  const body = req.body ?? {};
+  const token = typeof body.token === 'string' ? body.token : '';
+  if (!token) throw httpError(HTTP_BAD_REQUEST, 'token is required');
+  let claims;
+  try {
+    claims = parseClaims(token);
+  } catch (error) {
+    throw httpError(HTTP_BAD_REQUEST, error.message);
+  }
+  const email = String(body.email || claims.upn || claims.email || claims.preferred_username || '').toLowerCase();
+  if (!email) throw httpError(HTTP_BAD_REQUEST, 'Could not determine the account email from the token');
+  const identity = identityFromClaims(claims, email);
+  const rec = { ...identity, email: identity.email || email, token, savedAt: new Date().toISOString() };
+  if (typeof body.serverFnCookies === 'string' && body.serverFnCookies) rec.serverFnCookies = body.serverFnCookies;
+  if (typeof body.refreshToken === 'string' && body.refreshToken) rec.refreshToken = body.refreshToken;
+  if (typeof body.graphToken === 'string' && body.graphToken) { rec.graphToken = body.graphToken; rec.graphTokenExp = body.graphTokenExp ?? null; }
+  if (typeof body.spoHost === 'string' && body.spoHost) rec.spoHost = body.spoHost;
+  if (typeof body.clientEligibility === 'string' && body.clientEligibility) rec.clientEligibility = body.clientEligibility;
+  if (typeof body.serverFnSessionId === 'string' && body.serverFnSessionId) rec.serverFnSessionId = body.serverFnSessionId;
+  if (typeof body.chatSyncState === 'string' && body.chatSyncState) rec.chatSyncState = body.chatSyncState;
+  auth.ingestClientSession(rec);
+  res.json({ ok: true, email: rec.email, name: rec.name });
+}));
+
 app.post('/api/auth/login', handler(async (req, res) => {
-  const email = String(req.body?.email ?? '').trim();
+  const email = String(req.body?.email ?? '').trim().toLowerCase();
   if (!EMAIL_RE.test(email)) throw httpError(HTTP_BAD_REQUEST, 'Enter a valid email address');
+  // If a session was already captured (browser extension or an earlier sign-in), use it — no Chromium.
+  const captured = auth.getCapturedSession(email);
+  if (captured) {
+    setSessionCookie(res, email);
+    res.json({ loginId: crypto.randomUUID(), state: 'done', email, name: captured.name });
+    return;
+  }
+  if (!config.BROWSER_SIGNIN_ENABLED) {
+    throw httpError(
+      HTTP_BAD_REQUEST,
+      'Browser sign-in is disabled. Sign in to Copilot in this browser with the extension installed (or set COPILOT_BROWSER_SIGNIN=1 to re-enable server-side sign-in).',
+    );
+  }
   // { async: true } returns at once with state "working"; poll GET /api/auth/flow/:id for the outcome.
   const flow = req.body?.async ? await auth.startLoginBackground(email) : await auth.startLogin(email);
   if (flow.state === 'done') setSessionCookie(res, flow.email);

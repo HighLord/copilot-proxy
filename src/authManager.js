@@ -108,6 +108,19 @@ function dropSession(email) {
   try { fs.unlinkSync(sessionFile(email)); } catch { /* already gone */ }
 }
 
+// Ingests a session captured by the browser extension (no server-side Chromium). It writes to the
+// same store the Playwright sign-in uses, so every downstream flow (chat/upload/delete) is unchanged.
+function ingestClientSession(rec) {
+  if (!rec || !rec.email || !rec.token) throw new LoginError('Captured session is missing an email or token');
+  saveSession(rec);
+}
+
+// A valid session already in the store (from the extension or an earlier sign-in), or null.
+function getCapturedSession(email) {
+  const rec = sessions.get(String(email).toLowerCase());
+  return rec && sessionIsValid(rec) ? { email: rec.email, name: rec.name } : null;
+}
+
 // ---------- mock login (COPILOT_MOCK=1) ----------
 
 function mockToken(email) {
@@ -803,4 +816,6 @@ module.exports = {
   getSession,
   getStatus,
   dropSession,
+  ingestClientSession,
+  getCapturedSession,
 };

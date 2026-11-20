@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Copilot Proxy Bridge</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 13px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 14px; width: 300px; }
+    h1 { font-size: 14px; margin: 0 0 10px; }
+    label { display: block; font-size: 11px; margin: 10px 0 3px; color: #888; }
+    input { box-sizing: border-box; width: 100%; padding: 6px 8px; font: inherit; border: 1px solid #ccc; border-radius: 6px; }
+    .row { display: flex; gap: 6px; margin-top: 10px; }
+    button { flex: 1; padding: 7px; font: inherit; border: 1px solid #ccc; border-radius: 6px; background: #f2f2f2; cursor: pointer; }
+    button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+    .status { margin-top: 12px; padding: 10px; background: #f6f6f6; border-radius: 6px; }
+    .status div { margin: 2px 0; }
+    .ok { color: #16a34a; } .no { color: #dc2626; }
+    #result { margin-top: 8px; white-space: pre-wrap; word-break: break-word; font-size: 11px; color: #666; }
+    hr { border: none; border-top: 1px solid #eee; margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <h1>Copilot Proxy Bridge</h1>
+  <label for="targetUrl">Proxy URL</label>
+  <input id="targetUrl" placeholder="http://localhost:3000" spellcheck="false">
+  <label for="key">Client key (only if COPILOT_CLIENT_KEY is set)</label>
+  <input id="key" placeholder="optional" spellcheck="false">
+  <div class="row">
+    <button id="save" class="primary">Save</button>
+  </div>
+
+  <hr>
+
+  <div class="status" id="status">Loading…</div>
+  <div class="row">
+    <button id="push">Send session now</button>
+  </div>
+  <div id="result"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

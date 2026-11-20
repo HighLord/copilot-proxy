@@ -99,6 +99,14 @@ module.exports = Object.freeze({
   CHATHUB_WS_HOST: process.env.COPILOT_CHATHUB_WS_HOST ?? 'substrate.office.com',
   // COPILOT_HEADLESS=1 runs sign-in headless; the default shows the browser (more reliable).
   HEADLESS: process.env.COPILOT_HEADLESS === '1',
+
+  // ---- client-side (browser-extension) session capture ----
+  // The extension POSTs a captured Copilot session to /api/auth/client. When this key is set, that
+  // request must carry it in an x-client-key header; leave unset to trust the local network.
+  CLIENT_CAPTURE_KEY: process.env.COPILOT_CLIENT_KEY ?? '',
+  // COPILOT_BROWSER_SIGNIN=0 disables the server-side Playwright sign-in. With no captured session,
+  // /api/auth/login then fails with a clear message instead of launching Chromium.
+  BROWSER_SIGNIN_ENABLED: process.env.COPILOT_BROWSER_SIGNIN !== '0',
   LOGIN_STEP_TIMEOUT_MS: 60_000,
   TOKEN_CAPTURE_TIMEOUT_MS: 60_000,
   // A sign-in attempt left waiting on the person (password or code screen) is closed after this long,

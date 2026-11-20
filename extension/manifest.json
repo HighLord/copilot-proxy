@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Copilot Proxy Bridge",
+  "version": "1.0.0",
+  "description": "Captures your signed-in Copilot session from your own browser and sends it to your self-hosted copilot-proxy, so the server never has to run a browser.",
+  "permissions": ["webRequest", "cookies", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Copilot Proxy Bridge"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://copilot.cloud.microsoft/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

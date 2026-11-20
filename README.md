@@ -6,19 +6,40 @@ token copying.
 
 ## How it works
 
-1. You sign in with your Microsoft account. The server drives a real (headless) Chromium
-   through `copilot.cloud.microsoft`, completes the sign-in, and captures the Copilot chat
-   `access_token` from the Chathub WebSocket URL automatically.
-2. The browser's cookies are kept per account, so the next time the token expires the
-   server re-opens the browser and refreshes it silently. You are only asked for the
-   password again when the saved session has fully expired or sign-in fails.
-3. Identity is your email address. Every user gets their own preferences, memory and
-   conversation history under `data/users/<hash>/`. Admin customizations (system prompt,
-   modes, starters) are shared globally in `data/admin.json`.
+There are two ways to sign in:
+
+1. **Browser extension (recommended — no server memory).** Load the `extension/` folder in your own
+   Chrome (see [Browser extension](#browser-extension)). You sign into Copilot normally in that
+   browser; the extension captures the chat `access_token`, the `copilot.cloud.microsoft` cookies and
+   the MSAL upload tokens, and posts them to the proxy. The server stores them and never runs a
+   browser.
+2. **Server-side Chromium (fallback).** The server drives a headless Chromium through
+   `copilot.cloud.microsoft`, completes the sign-in, and captures the same artifacts. This is what
+   spikes server memory; once the extension is set up, set `COPILOT_BROWSER_SIGNIN=0` to forbid it.
+
+Identity is your email address. Every user gets their own preferences, memory and conversation
+history under `data/users/<hash>/`. Admin customizations (system prompt, modes, starters) are
+shared globally in `data/admin.json`.
 
 The `access_token` is a short-lived credential and is stored on disk under
 `data/auth/sessions/` so the server can keep working across restarts. Treat the `data/`
 directory as secret.
+
+## Browser extension
+
+The `extension/` folder is a Manifest V3 Chrome extension that captures your Copilot session from
+your own browser (the chat token from the Chathub WebSocket handshake, the cookies via
+`chrome.cookies`, and the MSAL upload tokens via a content script) and POSTs it to
+`/api/auth/client`. No server-side Chromium.
+
+1. `chrome://extensions` → **Developer mode** → **Load unpacked** → pick `extension/`.
+2. Open the extension popup, set the **Proxy URL** (default `http://localhost:3000`) and Save.
+   If the server sets `COPILOT_CLIENT_KEY`, put the same value in **Client key**.
+3. Sign into <https://copilot.cloud.microsoft> in that Chrome profile and send one message, so the
+   token is captured. Then open the proxy web UI and sign in with the same email — the server finds
+   the captured session and logs you in instantly.
+
+See `extension/README.md` for details.
 
 ## Model selection
 
@@ -92,6 +113,8 @@ Then open http://localhost:3000 and sign in.
 | `COPILOT_LOGIN_URL` | `https://copilot.cloud.microsoft` | Entry page for sign-in |
 | `COPILOT_HEADLESS` | *(unset)* | `1` hides the sign-in browser; the default shows it |
 | `COPILOT_CHATHUB_WS_HOST` | `substrate.office.com` | Host whose WebSocket carries the token |
+| `COPILOT_CLIENT_KEY` | *(unset)* | Shared key the browser extension must send to `/api/auth/client` |
+| `COPILOT_BROWSER_SIGNIN` | `1` | `0` disables server-side Chromium sign-in (extension-only) |
 | `COPILOT_SERVERFN_HASH` | *(captured hash)* | Route hash for the chat-history `_serverFn` (delete) endpoint |
 | `COPILOT_DEBUG_FRAMES` | `0` | `1` logs SignalR frames (token redacted) |
 

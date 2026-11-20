@@ -24,6 +24,11 @@ _Last updated: 2026-11-19_
   owner's own instructions for the API side live in `data/admin.json` under `apiInstructions`,
   editable in the Admin panel ("API instructions"). The minimal `<tool_call>` format + tool list are
   still sent (the parser depends on them); the harness's own `system` prompt passes through untouched.
+- **Browser-extension sign-in** — a Manifest V3 Chrome extension (`extension/`) captures the Copilot
+  session from the user's own browser (Chathub `access_token`, `copilot.cloud.microsoft` cookies,
+  MSAL refresh/Graph token) and posts it to `/api/auth/client`. Login then short-circuits to the
+  captured session, so the server never spawns Chromium. `COPILOT_BROWSER_SIGNIN=0` forbids the
+  server-side fallback; `COPILOT_CLIENT_KEY` (optional) gates the ingest endpoint.
 
 ## Remaining / needs a live smoke test
 1. **Token capture (real sign-in)** — the Chathub WebSocket token capture after a real sign-in has
@@ -39,6 +44,10 @@ _Last updated: 2026-11-19_
    copilot.cloud.microsoft that it is gone. If it 409s or no-ops, the likely fix is to capture the
    full history state at sign-in (`flow.chatSyncState` only stores the watermark today) and replay
    the chat list in `src/historyClient.js`.
+4. **Extension capture end-to-end** — the `extension/` sign-in path is unit-tested server-side
+   (ingest → login short-circuit) but the extension itself has not been exercised against a real
+   Chrome + real Copilot session. Load it, sign into Copilot, confirm the popup shows all three
+   checkmarks, and that the proxy web UI logs you in without a password prompt.
 
 ## How to resume
 - Run `node --test test/compat.test.js` (36 tests) — all pass.
