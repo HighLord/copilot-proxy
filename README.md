@@ -39,6 +39,14 @@ block, the OpenAI-compatible API streams them as `delta.reasoning_content` (and
 `message.reasoning_content` non-streaming), and the Anthropic-compatible API emits `thinking`
 blocks.
 
+## API instructions
+
+The `/v1` API does not inject any hardcoded guidance prose. Any instructions for the API side are
+written by you in the Admin panel under **API instructions** (stored as `apiInstructions` in
+`data/admin.json`); leave it empty to send none. The minimal `<tool_call>` format and the tool list
+are still sent because the tool-calling emulation depends on them, and the harness's own `system`
+prompt passes through unchanged.
+
 ## File attachments
 
 Copilot has no direct file upload over the WebSocket. Files are uploaded to the "Microsoft

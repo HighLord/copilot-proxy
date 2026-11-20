@@ -1256,6 +1256,8 @@
     const appName = h('input', { type: 'text', maxlength: 40, value: data.appName });
     const system = h('textarea', { maxlength: 3000, placeholder: 'e.g. You are a helpful assistant for our team. Answer briefly.' });
     system.value = data.systemPrompt;
+    const apiInstructions = h('textarea', { maxlength: 3000, placeholder: 'Injected into /v1 API requests only. Leave empty to send no guidance.' });
+    apiInstructions.value = data.apiInstructions ?? '';
     const defaultMode = h('select', null, h('option', { value: 'quick' }, 'Quick response'), h('option', { value: 'deep' }, 'Think deeper'));
     defaultMode.value = data.defaultMode;
     const cards = { quick: modeCard('quick', data.modes.quick), deep: modeCard('deep', data.modes.deep) };
@@ -1280,7 +1282,7 @@
       let payload;
       try {
         payload = {
-          appName: appName.value, systemPrompt: system.value, defaultMode: defaultMode.value,
+          appName: appName.value, systemPrompt: system.value, apiInstructions: apiInstructions.value, defaultMode: defaultMode.value,
           modes: { quick: cards.quick.get(), deep: cards.deep.get() },
           starters: starters.filter((s) => s.label.trim()),
         };
@@ -1306,6 +1308,7 @@
     body.append(
       h('h3', null, 'Instructions'),
       field('System prompt', system, 'Sent at the start of every chat and again whenever it changes. Copilot has no separate system field, so it is written ahead of the first message.'),
+      field('API instructions', apiInstructions, 'Injected only into /v1 API requests (the harness-facing API). The chat UI uses the system prompt above instead. Leave empty to send no guidance from this proxy.'),
       field('App name', appName),
       field('Default mode', defaultMode),
       h('h3', null, 'Modes'),

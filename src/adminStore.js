@@ -69,6 +69,7 @@ function updateAdmin(input) {
   const next = structuredClone(getAdmin());
   if ('appName' in input) next.appName = checkString(input.appName, 40, 'appName', { allowEmpty: false }).trim();
   if ('systemPrompt' in input) next.systemPrompt = checkString(input.systemPrompt, config.MAX_SYSTEM_PROMPT_CHARS, 'systemPrompt');
+  if ('apiInstructions' in input) next.apiInstructions = checkString(input.apiInstructions, config.MAX_API_INSTRUCTIONS_CHARS, 'apiInstructions');
   if ('defaultMode' in input) {
     if (!MODE_IDS.includes(input.defaultMode)) throw new ValidationError('defaultMode must be "quick" or "deep"');
     next.defaultMode = input.defaultMode;

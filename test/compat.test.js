@@ -145,16 +145,34 @@ test('prompt: never exceeds the budget, whatever the harness sends', () => {
   }
 });
 
-test('prompt: tells Copilot its own sandbox is off and the harness tools are the way to act', () => {
+test('prompt: injects no guidance prose by default; the tool call format and tool list remain', () => {
   const { prompt } = renderPrompt({
     messages: [{ role: 'user', text: 'hi' }],
     tools: [{ name: 'read_file', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }],
     budget: 8_000,
   });
-  assert.match(prompt, /code interpreter/);
-  assert.match(prompt, /\/mnt\/data/);
+  assert.doesNotMatch(prompt, /code interpreter/);
+  assert.doesNotMatch(prompt, /\/mnt\/data/);
+  assert.doesNotMatch(prompt, /external agent harness/);
   assert.match(prompt, /<tool_call>/);
   assert.match(prompt, /read_file\(path: string\)/);
+});
+
+test('prompt: the owner\'s own API instructions are injected when set, absent when empty', () => {
+  const withInstructions = renderPrompt({
+    instructions: 'You are a rock-solid agent. Always call tools.',
+    messages: [{ role: 'user', text: 'hi' }],
+    tools: [{ name: 'read_file', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }],
+    budget: 8_000,
+  }).prompt;
+  assert.match(withInstructions, /rock-solid agent/);
+  assert.match(withInstructions, /Always call tools/);
+  const without = renderPrompt({
+    messages: [{ role: 'user', text: 'hi' }],
+    tools: [{ name: 'read_file', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }],
+    budget: 8_000,
+  }).prompt;
+  assert.doesNotMatch(without, /rock-solid agent/);
 });
 
 test('prompt: keeps the opening task and the newest turns, marks what was left out', () => {

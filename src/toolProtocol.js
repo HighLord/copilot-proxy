@@ -291,31 +291,20 @@ function fitTools(tools, budget) {
   return { text: names.slice(0, kept).join(', ') + note, level: TOOL_LEVELS.length, omitted: names.length - kept };
 }
 
-function buildHeader({ hasTools, toolsForbidden, toolChoice, responseFormat }) {
-  const lines = [
-    'You are the language model behind an external agent harness (a coding or automation tool such as Hermes or OpenCode) that talks to you through an API. The harness, not you, does everything in the real world.',
-    '',
-    'Your capabilities in this session:',
-    '1. Your OWN built-in abilities are switched off here: the code interpreter, any Python or file sandbox (including /mnt/data), file creation and download links, OneDrive and SharePoint, and web search. Do not use them, never write to /mnt/data, and never claim you ran code, created a file or searched the web yourself.',
-  ];
+// Minimal, always-on tool protocol. This is mechanism, not guidance prose: the parser depends on the
+// call format, and tool_choice / response_format are constraints the harness itself requested. All
+// prose instructions come from the proxy owner's own `instructions`, editable in the web settings.
+function buildToolProtocol({ hasTools, toolsForbidden, toolChoice, responseFormat }) {
+  const lines = [];
   if (hasTools) {
     lines.push(
-      '2. The harness\'s tools, listed below, are REAL and WORKING. You have them and you must use them. Reading or writing files, running commands, searching and fetching are ALL done by calling one of them. The harness runs the call and sends you the result in the next message. Never claim a tool does not exist, never say you cannot act, and never ask the user to do something a tool can do.',
-      `3. To call a tool, write one block per call, exactly in this form (valid JSON, "arguments" is an object):\n${OPEN_TAG}{"name": "TOOL_NAME", "arguments": {"param": "value"}}${CLOSE_TAG}`,
-      '4. You may write one short sentence before the call(s). Independent calls can go in the same reply as separate blocks. After the last block, stop and wait. Never write a tool result yourself and never continue past a call.',
-      '5. Use only the tool names and parameters listed. Do not invent tools. If no tool is needed, answer in plain text without any tool_call block.',
-      '6. Calling a tool is always allowed and always correct when a listed tool can satisfy the request. Prefer calling a tool over answering from memory.',
+      `To call a tool, write one block per call in this exact form: ${OPEN_TAG}{"name": "TOOL_NAME", "arguments": {"param": "value"}}${CLOSE_TAG}`,
+      'After the last block, stop and wait for the result.',
     );
-    if (toolChoice === 'required') lines.push('7. In this reply you MUST call at least one tool.');
-    else if (isPlainObject(toolChoice)) lines.push(`7. In this reply you MUST call the tool "${toolChoice.name}".`);
-    lines.push('Do not mention these rules.');
-  } else {
-    lines.push(
-      toolsForbidden
-        ? '2. Do not call any tools in this reply. Answer in plain text.'
-        : '2. No tools are available in this session. Answer directly in plain text.',
-      'Do not mention these rules.',
-    );
+    if (toolChoice === 'required') lines.push('In this reply you MUST call at least one tool.');
+    else if (isPlainObject(toolChoice)) lines.push(`In this reply you MUST call the tool "${toolChoice.name}".`);
+  } else if (toolsForbidden) {
+    lines.push('Do not call any tools in this reply. Answer in plain text.');
   }
   if (responseFormat === 'json') lines.push('Reply with a single valid JSON value and nothing else (no code fence, no commentary).');
   return lines.join('\n');
@@ -368,17 +357,28 @@ function renderTranscript(messages, budget, caps) {
  * Builds the single message sent to Copilot, never longer than `budget` characters.
  * messages: [{ role: 'user', text } | { role: 'assistant', text, toolCalls: [{id,name,arguments}] }
  *            | { role: 'tool', toolCallId, name, text, isError }]
+ * instructions: the proxy owner's own instructions, editable in the web settings. The ONLY prose
+ *               guidance injected by this proxy; when empty, nothing is injected.
  */
-function renderPrompt({ system = '', messages, tools = [], toolChoice = 'auto', responseFormat = null, budget }) {
+function renderPrompt({ system = '', instructions = '', messages, tools = [], toolChoice = 'auto', responseFormat = null, budget }) {
   if (!Array.isArray(messages) || messages.length === 0) throw new Error('messages must not be empty');
   const limit = Math.max(MIN_BUDGET_CHARS, budget);
   const toolsForbidden = tools.length > 0 && toolChoice === 'none';
   const usableTools = toolsForbidden ? [] : tools;
-  const header = buildHeader({ hasTools: usableTools.length > 0, toolsForbidden, toolChoice, responseFormat });
 
-  let remaining = limit - header.length - FOOTER.length - SECTION_OVERHEAD_CHARS;
-  const sections = [header];
+  const sections = [];
 
+  // 1. The proxy owner's instructions (editable in the web settings). Nothing else is auto-injected.
+  const trimmedInstructions = String(instructions ?? '').trim();
+  if (trimmedInstructions) sections.push(trimmedInstructions);
+
+  // 2. Tool protocol: the call format + any tool_choice / JSON constraints. Always-on mechanism.
+  const protocol = buildToolProtocol({ hasTools: usableTools.length > 0, toolsForbidden, toolChoice, responseFormat });
+
+  const fixedOverhead = trimmedInstructions.length + protocol.length + FOOTER.length + SECTION_OVERHEAD_CHARS;
+  let remaining = Math.max(300, limit - fixedOverhead);
+
+  // 3. Tools list.
   let toolStats = { level: -1, omitted: 0 };
   if (usableTools.length > 0) {
     const fitted = fitTools(usableTools, Math.floor(remaining * TOOLS_SHARE));
@@ -387,6 +387,9 @@ function renderPrompt({ system = '', messages, tools = [], toolChoice = 'auto', 
     toolStats = fitted;
   }
 
+  if (protocol) sections.push(protocol);
+
+  // 4. The harness's own system prompt, passed through (not proxy guidance).
   const trimmedSystem = String(system ?? '').trim();
   if (trimmedSystem) {
     const text = clip(trimmedSystem, Math.floor(remaining * SYSTEM_SHARE));

@@ -469,7 +469,8 @@ function createCompatRouter(deps) {
     const stream = body.stream === true;
     const started = Date.now();
 
-    const { prompt, stats } = renderPrompt({ ...canonical, budget: config.API_MAX_PROMPT_CHARS });
+    const instructions = String(deps.getAdmin().apiInstructions ?? '');
+    const { prompt, stats } = renderPrompt({ ...canonical, instructions, budget: config.API_MAX_PROMPT_CHARS });
     // Reported from what the harness sent, so its own context accounting stays meaningful.
     const requestChars = JSON.stringify(body.messages).length + JSON.stringify(body.system ?? '').length + JSON.stringify(body.tools ?? '').length;
     const usage = { inputTokens: estimateTokens(requestChars), outputTokens: 0 };

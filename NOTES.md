@@ -20,6 +20,10 @@ _Last updated: 2026-11-19_
   truth; a Copilot sync failure is reported but never blocks the local delete. The `/v1` API is
   deliberately untouched.
 - OpenAI- and Anthropic-compatible API under `/v1` (tool calling emulated via `<tool_call>` blocks).
+- **API instructions** — the `/v1` API no longer injects any hardcoded guidance prose. The proxy
+  owner's own instructions for the API side live in `data/admin.json` under `apiInstructions`,
+  editable in the Admin panel ("API instructions"). The minimal `<tool_call>` format + tool list are
+  still sent (the parser depends on them); the harness's own `system` prompt passes through untouched.
 
 ## Remaining / needs a live smoke test
 1. **Token capture (real sign-in)** — the Chathub WebSocket token capture after a real sign-in has
@@ -37,7 +41,7 @@ _Last updated: 2026-11-19_
    the chat list in `src/historyClient.js`.
 
 ## How to resume
-- Run `node --test test/compat.test.js` (35 tests) — all pass.
+- Run `node --test test/compat.test.js` (36 tests) — all pass.
 - Sign in fresh (start the server, open the app, complete sign-in incl. 2FA), then attach a file to
   verify the upload path against the real OneDrive/Graph flow, and delete a chat to verify the
   Copilot-side delete.

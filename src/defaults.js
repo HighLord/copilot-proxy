@@ -18,6 +18,9 @@ function defaultAdminSettings() {
   return {
     appName: 'Copilot',
     systemPrompt: '',
+    // Instructions injected only into the /v1 API path (the harness-facing API). The chat UI path
+    // uses systemPrompt + per-mode prompts instead. Empty by default: the proxy injects nothing.
+    apiInstructions: '',
     defaultMode: 'quick',
     modes: {
       quick: {
